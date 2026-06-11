@@ -144,25 +144,36 @@ class jtag_worker:  # 解析bsdl文件， 基于bsdl从jtag获取数据
         self.jc.set_pin_state(self.dev_num, pin, state, 'output')
         self.jc.scan()
 
-    def extest_blink(self, pin_name, freq_hz=2, duration_s=3):
-        """函数3: EXTEST模式驱动引脚闪烁
+    def extest_blink_with_monitor(self, blink_pin_name, monitor_pin_name, freq_hz=2, duration_s=3):
+        """函数3改进版: EXTEST模式驱动引脚闪烁，并在每次设置后立即读取监控引脚状态
 
         Args:
-            pin_name: 引脚名称，如 'PS_MIO51'
+            blink_pin_name: 要闪烁的引脚名称，如 'PS_MIO51'
+            monitor_pin_name: 要监控的引脚名称，如 'PS_MIO0'
             freq_hz: 闪烁频率(Hz)
             duration_s: 持续时间(秒)
         """
         half_period_s = 1.0 / (2 * freq_hz)  # 半周期
         total_toggles = int(freq_hz * 2 * duration_s)  # 总翻转次数
 
-        print(f'\n--- EXTEST闪烁: {pin_name} @ {freq_hz}Hz, 持续 {duration_s}s ---')
+        print(f'\n--- EXTEST闪烁 {blink_pin_name} 并监控 {monitor_pin_name}: @ {freq_hz}Hz, 持续 {duration_s}s ---')
 
         # 切换到 EXTEST 模式
         self.jc.set_scan_mode(self.dev_num, 'extest')
         self.mode = 'extest'
 
-        # 使能输出 (oe_disable=1, 所以设oe=True表示使能)
-        self.jc.set_pin_state(self.dev_num, pin_name, True, 'oe')
+        # 使能闪烁引脚的输出
+        self.jc.set_pin_state(self.dev_num, blink_pin_name, True, 'oe')
+        
+        # 获取监控引脚的详细信息
+        pin_id = self.jc.get_pin_id(self.dev_num, monitor_pin_name)
+        io_reg = self.jc.bsdl[self.dev_num].io_regs[pin_id]
+        print(f'{monitor_pin_name} IO Register: {io_reg}')
+        
+        # 读取初始状态
+        initial_output = self.jc.get_pin_state(self.dev_num, monitor_pin_name, 'output')
+        initial_oe = self.jc.get_pin_state(self.dev_num, monitor_pin_name, 'oe')
+        print(f'{monitor_pin_name} 初始状态 - output: {initial_output}, oe: {initial_oe}\n')
 
         start_time = time.perf_counter()
         state = False  # 初始低电平
@@ -171,12 +182,20 @@ class jtag_worker:  # 解析bsdl文件， 基于bsdl从jtag获取数据
             state = not state
             t0 = time.perf_counter()
 
-            self.jc.set_pin_state(self.dev_num, pin_name, state, 'output')
+            # 只修改目标引脚的状态
+            self.jc.set_pin_state(self.dev_num, blink_pin_name, state, 'output')
+            
+            # 执行一次完整的扫描
             self.jc.scan()
+            
+            # 立即读取监控引脚的状态
+            monitor_output = self.jc.get_pin_state(self.dev_num, monitor_pin_name, 'output')
+            monitor_oe = self.jc.get_pin_state(self.dev_num, monitor_pin_name, 'oe')
 
             scan_ms = (time.perf_counter() - t0) * 1000
             elapsed_s = time.perf_counter() - start_time
-            print(f'[{i+1:2d}] {pin_name} = {int(state)}  '
+            print(f'[{i+1:2d}] {blink_pin_name} = {int(state)}  '
+                  f'| {monitor_pin_name}_out={monitor_output}, {monitor_pin_name}_oe={monitor_oe}  '
                   f'(扫描 {scan_ms:.1f}ms, 总耗时 {elapsed_s:.2f}s)')
 
             # 等待剩余时间
@@ -184,9 +203,9 @@ class jtag_worker:  # 解析bsdl文件， 基于bsdl从jtag获取数据
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
-        # 结束后恢复低电平并禁用输出
-        self.jc.set_pin_state(self.dev_num, pin_name, False, 'output')
-        self.jc.set_pin_state(self.dev_num, pin_name, False, 'oe')
+        # 结束后恢复初始状态并禁用输出
+        self.jc.set_pin_state(self.dev_num, blink_pin_name, False, 'output')
+        self.jc.set_pin_state(self.dev_num, blink_pin_name, False, 'oe')
         self.jc.scan()
 
         # 切回 SAMPLE 模式
@@ -194,7 +213,7 @@ class jtag_worker:  # 解析bsdl文件， 基于bsdl从jtag获取数据
         self.mode = 'sample'
 
         total_ms = (time.perf_counter() - start_time) * 1000
-        print(f'--- EXTEST闪烁结束: {total_toggles} 次翻转, 总耗时 {total_ms:.0f}ms ---')
+        print(f'\n--- EXTEST闪烁结束: {total_toggles} 次翻转, 总耗时 {total_ms:.0f}ms ---')
 
     def set_i2c_pins(self, scl_pin, sda_pin, isPinLocation=False):
         raise NotImplementedError("I2C操作需要Viveris JTAGCore DLL支持，PyLink接口暂未实现")
@@ -217,6 +236,127 @@ class jtag_worker:  # 解析bsdl文件， 基于bsdl从jtag获取数据
                 pass  # 部分引脚可能没有 input cell
 
         return results
+
+    def monitor_pin_during_extest(self, monitor_pin_name, blink_pin_name, freq_hz=2, duration_s=3):
+        """函数4: 在EXTEST闪烁期间监控另一个引脚的状态（验证其不受影响）
+
+        Args:
+            monitor_pin_name: 要监控的引脚名称，如 'PS_MIO0'
+            blink_pin_name: 正在闪烁的引脚名称，如 'PS_MIO51'
+            freq_hz: 闪烁频率(Hz)
+            duration_s: 持续时间(秒)
+        """
+        half_period_s = 1.0 / (2 * freq_hz)
+        total_toggles = int(freq_hz * 2 * duration_s)
+
+        print(f'\n--- 监控 {monitor_pin_name} 当 {blink_pin_name} 闪烁时 ---')
+        print(f'    闪烁参数: {freq_hz}Hz, 持续 {duration_s}s')
+        print(f'    预期: {monitor_pin_name} 状态应保持不变\n')
+
+        # 切换到 EXTEST 模式
+        self.jc.set_scan_mode(self.dev_num, 'extest')
+        self.mode = 'extest'
+
+        # 使能闪烁引脚的输出
+        self.jc.set_pin_state(self.dev_num, blink_pin_name, True, 'oe')
+        
+        # 读取监控引脚的初始状态（output 和 oe）
+        initial_output_state = self.jc.get_pin_state(self.dev_num, monitor_pin_name, 'output')
+        initial_oe_state = self.jc.get_pin_state(self.dev_num, monitor_pin_name, 'oe')
+        print(f'{monitor_pin_name} 初始 output 状态: {initial_output_state}')
+        print(f'{monitor_pin_name} 初始 oe 状态: {initial_oe_state}')
+        
+        # 获取监控引脚的详细信息
+        pin_id = self.jc.get_pin_id(self.dev_num, monitor_pin_name)
+        pin_props = self.jc.get_pin_properties(self.dev_num, pin_id)
+        io_reg = self.jc.bsdl[self.dev_num].io_regs[pin_id]
+        print(f'{monitor_pin_name} 详细信息:')
+        print(f'  Pin ID: {pin_id}')
+        print(f'  Properties: {pin_props}')
+        print(f'  IO Register: {io_reg}')
+
+        state_changes = []
+        oe_changes = []
+        start_time = time.perf_counter()
+        blink_state = False
+
+        for i in range(total_toggles):
+            blink_state = not blink_state
+            t0 = time.perf_counter()
+
+            # 只设置闪烁引脚的状态
+            self.jc.set_pin_state(self.dev_num, blink_pin_name, blink_state, 'output')
+            
+            # 执行扫描
+            self.jc.scan()
+
+            # 读取监控引脚的 output 和 oe 状态
+            monitor_output = self.jc.get_pin_state(self.dev_num, monitor_pin_name, 'output')
+            monitor_oe = self.jc.get_pin_state(self.dev_num, monitor_pin_name, 'oe')
+            state_changes.append(monitor_output)
+            oe_changes.append(monitor_oe)
+
+            elapsed_s = time.perf_counter() - start_time
+            
+            # 只在状态变化时打印
+            output_changed = len(state_changes) > 1 and state_changes[-1] != state_changes[-2]
+            oe_changed = len(oe_changes) > 1 and oe_changes[-1] != oe_changes[-2]
+            
+            if i == 0 or output_changed or oe_changed:
+                change_flags = []
+                if output_changed:
+                    change_flags.append("output变化!")
+                if oe_changed:
+                    change_flags.append("oe变化!")
+                flag_str = f' <<< {", ".join(change_flags)}' if change_flags else ""
+                
+                print(f'[{i+1:3d}] {blink_pin_name}={int(blink_state)}, '
+                      f'{monitor_pin_name}_out={monitor_output}, {monitor_pin_name}_oe={monitor_oe}'
+                      f'{flag_str} (t={elapsed_s:.2f}s)')
+
+            # 等待剩余时间
+            sleep_time = half_period_s - (time.perf_counter() - t0)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
+        # 恢复状态
+        self.jc.set_pin_state(self.dev_num, blink_pin_name, False, 'output')
+        self.jc.set_pin_state(self.dev_num, blink_pin_name, False, 'oe')
+        self.jc.scan()
+
+        # 切回 SAMPLE 模式
+        self.jc.set_scan_mode(self.dev_num, 'sample')
+        self.mode = 'sample'
+
+        # 统计结果
+        unique_output_states = set(state_changes)
+        unique_oe_states = set(oe_changes)
+        output_changes_count = sum(1 for i in range(1, len(state_changes)) if state_changes[i] != state_changes[i-1])
+        oe_changes_count = sum(1 for i in range(1, len(oe_changes)) if oe_changes[i] != oe_changes[i-1])
+        
+        print(f'\n--- 监控结束 ---')
+        print(f'{monitor_pin_name} 状态统计:')
+        print(f'  Output 状态:')
+        print(f'    初始值: {initial_output_state}')
+        print(f'    最终值: {state_changes[-1] if state_changes else "N/A"}')
+        print(f'    唯一值: {unique_output_states}')
+        print(f'    变化次数: {output_changes_count}/{len(state_changes)-1 if len(state_changes) > 1 else 0}')
+        print(f'  OE 状态:')
+        print(f'    初始值: {initial_oe_state}')
+        print(f'    最终值: {oe_changes[-1] if oe_changes else "N/A"}')
+        print(f'    唯一值: {unique_oe_states}')
+        print(f'    变化次数: {oe_changes_count}/{len(oe_changes)-1 if len(oe_changes) > 1 else 0}')
+        
+        if len(unique_output_states) == 1 and len(unique_oe_states) == 1:
+            print(f'  ✓ 正常: {monitor_pin_name} 的 output 和 oe 状态均未受影响')
+        else:
+            print(f'  ✗ 异常: {monitor_pin_name} 的状态发生变化！')
+            if len(unique_output_states) > 1:
+                print(f'    - output 状态发生了变化')
+            if len(unique_oe_states) > 1:
+                print(f'    - oe 状态发生了变化')
+        
+        return output_changes_count + oe_changes_count
 
     def monitor_pin(self, pin_name, interval_ms=20, count=50):
         """函数2: 定时读取指定引脚状态并打印
@@ -336,7 +476,13 @@ if __name__ == '__main__':
     jw.monitor_pin('PS_MIO51', interval_ms=20, count=100)  # 20ms × 100次 = 2秒
 
     '''
-    函数3: EXTEST模式 - PS_MIO51 以 2Hz 闪烁 3秒
+    函数3: EXTEST模式 - PS_MIO51 以 1Hz (间隔0.5s) 闪烁 3秒，同时监控 PS_MIO0
     '''
-    print('\n===== 函数3: EXTEST闪烁 PS_MIO51 (2Hz, 3秒) =====')
-    jw.extest_blink('PS_MIO51', freq_hz=2, duration_s=3)
+    print('\n===== 函数3: EXTEST闪烁 PS_MIO51 (1Hz, 3秒) 并监控 PS_MIO0 =====')
+    jw.extest_blink_with_monitor('PS_MIO51', 'PS_MIO0', freq_hz=1, duration_s=3)
+
+    '''
+    函数4: EXTEST闪烁时监控 PS_MIO0 状态（验证不受影响）
+    '''
+    print('\n===== 函数4: 监控 PS_MIO0 当 PS_MIO51 闪烁时 =====')
+    changes = jw.monitor_pin_during_extest('PS_MIO0', 'PS_MIO51', freq_hz=2, duration_s=3)

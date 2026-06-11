@@ -123,6 +123,7 @@ class MainWindow:
         # 模式选择
         ttk.Label(toolbar, text='模式:').pack(side=LEFT, padx=(5, 2))
         self._mode_var = tk.StringVar(value='sample')
+        self._mode_var.trace_add('write', lambda *a: self._on_mode_changed())
         mode_combo = ttkb.Combobox(toolbar, textvariable=self._mode_var,
                                     values=['sample', 'extest'],
                                     width=8, state='readonly')
@@ -364,6 +365,36 @@ class MainWindow:
                               values=(name, loc, io_str, '-', type_str),
                               tags=(tag,) if tag else ())
 
+    def _on_mode_changed(self):
+        """模式切换时立即进入对应模式"""
+        if not self._jc or self._dev_num is None:
+            return
+        
+        # 如果正在连续扫描中，不处理（由 Run/Stop 控制）
+        if self._continuous_running:
+            return
+        
+        mode = self._mode_var.get().strip().lower()
+        try:
+            if mode == 'extest':
+                # 进入 EXTEST 模式
+                self._extest_mode = True
+                self._jc.set_scan_mode(self._dev_num, 'extest')
+                self._jc.scan()
+                self._status_var.set('已进入 EXTEST 模式 - 可右键设置引脚状态')
+                self._update_grid_mode_label()
+            else:
+                # 退出 EXTEST 模式，回到 SAMPLE
+                if self._extest_mode:
+                    self._extest_mode = False
+                    self._pin_z_set.clear()
+                self._jc.set_scan_mode(self._dev_num, 'sample')
+                self._jc.scan()
+                self._status_var.set('已进入 SAMPLE 模式')
+                self._update_grid_mode_label()
+        except Exception as e:
+            messagebox.showerror('模式切换错误', str(e))
+
     def _on_sample(self):
         """执行一次 SAMPLE 扫描"""
         if not self._jc or self._dev_num is None:
@@ -506,7 +537,16 @@ class MainWindow:
     def _extest_set_pin(self, pin_name, mode):
         """EXTEST 模式下设置引脚状态: '0', '1', 'Z'"""
         if not self._jc or self._dev_num is None:
+            messagebox.showwarning('提示', '请先连接设备')
             return
+        
+        # 如果不在 EXTEST 模式，自动切换
+        if not self._extest_mode:
+            self._extest_mode = True
+            self._jc.set_scan_mode(self._dev_num, 'extest')
+            self._mode_var.set('extest')
+            self._update_grid_mode_label()
+        
         dev = self._dev_num
         try:
             if mode == 'Z':
@@ -529,17 +569,22 @@ class MainWindow:
             else:
                 return
 
+            # 执行扫描，将设置应用到硬件
             self._jc.scan()
 
-            # 更新网格
+            # 立即更新网格显示
             self._sample_grid.update_states({pin_name: val})
-            # 更新引脚表
-            self._tree.set(pin_name, 'value', 'Z' if mode == 'Z' else mode)
-            # 更新波形
+            
+            # 更新引脚表值列
+            display_val = 'Z' if mode == 'Z' else str(val)
+            self._tree.set(pin_name, 'value', display_val)
+            
+            # 立即更新波形图（实时显示变化）
             waveform_data = {pin_name: {'output': val}}
             self._waveform.append_samples(waveform_data)
 
             self._status_var.set(f'EXTEST: {pin_name} -> {mode}')
+            
         except Exception as e:
             messagebox.showerror('EXTEST 错误', f'设置 {pin_name} 失败: {e}')
 
