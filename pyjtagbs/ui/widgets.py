@@ -9,10 +9,11 @@ class SampleGrid(tk.Canvas):
 
     CELL_SIZE = 14
     CELL_GAP = 1
-    COLOR_LOW = '#333333'      # 0 - 深色
-    COLOR_HIGH = '#2196F3'     # 1 - 蓝色
-    COLOR_Z = '#FF9800'        # Z - 橙色（高阻）
-    COLOR_UNKNOWN = '#F44336'  # 未知 - 红色
+    COLOR_LOW = '#000000'      # 0 - 黑色
+    COLOR_HIGH = '#F44336'     # 1 - 红色
+    COLOR_Z = '#795548'        # Z - 棕色（高阻）
+    COLOR_LINKAGE = '#2196F3'  # Linkage - 蓝色
+    COLOR_UNKNOWN = '#9E9E9E'  # 未知 - 灰色
 
     def __init__(self, parent, **kwargs):
         kwargs.setdefault('bg', '#FAFAFA')
@@ -21,20 +22,38 @@ class SampleGrid(tk.Canvas):
 
         self._pin_names = []
         self._pin_states = {}
+        self._pin_linked = set()  # linkage 引脚集合
+        self._pin_locations = {}  # pin_name -> location string
         self._cols = 20
         self._rect_ids = {}  # pin_name -> canvas rect id
         self._tooltip = None
+        self._device_info = None  # 设备信息显示
 
         self.bind('<Motion>', self._on_motion)
         self.bind('<Leave>', self._on_leave)
 
-    def load_pins(self, pin_names):
+    def load_pins(self, pin_names, linked_pins=None):
         """设置引脚名称列表"""
         self._pin_names = list(pin_names)
         self._pin_states = {n: -1 for n in pin_names}
+        self._pin_linked = set(linked_pins) if linked_pins else set()
         n = len(pin_names)
         self._cols = max(1, math.ceil(math.sqrt(n)))
         self._draw_grid()
+
+    def set_device_info(self, info_dict):
+        """设置设备信息显示: {name, idcode, pins, mode}"""
+        self._device_info = info_dict
+        self._draw_grid()
+
+    def set_linked_pins(self, linked_pins):
+        """更新 linkage 引脚集合"""
+        self._pin_linked = set(linked_pins)
+        self._update_colors()
+
+    def set_pin_locations(self, location_map):
+        """设置引脚位置映射 (pin_name -> location string)"""
+        self._pin_locations = dict(location_map)
 
     def update_states(self, pin_states):
         """更新引脚状态"""
@@ -49,11 +68,22 @@ class SampleGrid(tk.Canvas):
         margin = 8
         cols = self._cols
 
-        # 标题
-        self.create_text(margin, margin, text='SAMPLE', anchor='nw',
-                         font=('Segoe UI', 10, 'bold'))
-
-        y_offset = margin + 18
+        # 设备信息头
+        y_offset = margin
+        if self._device_info:
+            info = self._device_info
+            name = info.get('name', 'Unknown')
+            idcode = info.get('idcode', 0)
+            pin_count = info.get('pins', 0)
+            mode = info.get('mode', 'SAMPLE')
+            header = f'{name}  |  IDCODE: 0x{idcode:08X}  |  {pin_count} pins  |  {mode}'
+            self.create_text(margin, y_offset, text=header, anchor='nw',
+                             font=('Consolas', 10, 'bold'), fill='#1565C0')
+            y_offset += 18
+        else:
+            self.create_text(margin, y_offset, text='SAMPLE', anchor='nw',
+                             font=('Segoe UI', 10, 'bold'))
+            y_offset += 18
         self._rect_ids = {}
 
         for idx, name in enumerate(self._pin_names):
@@ -63,7 +93,7 @@ class SampleGrid(tk.Canvas):
             y = y_offset + row * (cs + gap)
 
             state = self._pin_states.get(name, -1)
-            color = self._get_color(state)
+            color = self._get_color(state, name)
 
             rect_id = self.create_rectangle(x, y, x + cs, y + cs,
                                             fill=color, outline='#BDBDBD', width=1)
@@ -73,18 +103,20 @@ class SampleGrid(tk.Canvas):
         """更新所有矩形颜色"""
         for name, (rect_id, _, _) in self._rect_ids.items():
             state = self._pin_states.get(name, -1)
-            color = self._get_color(state)
+            color = self._get_color(state, name)
             self.itemconfigure(rect_id, fill=color)
 
-    def _get_color(self, state):
-        """根据状态返回颜色"""
+    def _get_color(self, state, pin_name=None):
+        """根据状态返回颜色: Black=0, Red=1, Brown=Z, Blue=linkage"""
+        if pin_name and pin_name in self._pin_linked:
+            return self.COLOR_LINKAGE
         if state == 0:
-            return self.COLOR_LOW
+            return self.COLOR_LOW       # 黑色
         elif state == 1:
-            return self.COLOR_HIGH
-        elif state == 2:  # Z 高阻
-            return self.COLOR_Z
-        return self.COLOR_UNKNOWN
+            return self.COLOR_HIGH      # 红色
+        elif state == 2:                # Z 高阻
+            return self.COLOR_Z         # 棕色
+        return self.COLOR_UNKNOWN       # 灰色
 
     def _on_motion(self, event):
         """鼠标悬停显示 tooltip"""
@@ -102,9 +134,15 @@ class SampleGrid(tk.Canvas):
             if 0 <= idx < len(self._pin_names):
                 name = self._pin_names[idx]
                 state = self._pin_states.get(name, -1)
-                state_str = {0: '0', 1: '1', 2: 'Z'}.get(state, '?')
-                self._show_tooltip(event.x_root, event.y_root,
-                                   f'{name} = {state_str}')
+                is_linked = name in self._pin_linked
+                state_str = 'linkage' if is_linked else {0: '0', 1: '1', 2: 'Z'}.get(state, '?')
+                loc = self._pin_locations.get(name, '')
+                tip = f'#{idx}'
+                if loc:
+                    tip += f' / {loc}'
+                tip += f' / {name}'
+                tip += f' / {state_str}'
+                self._show_tooltip(event.x_root, event.y_root, tip)
                 # 高亮当前矩形
                 for n, (rid, _, _) in self._rect_ids.items():
                     if n == name:
@@ -261,7 +299,7 @@ class WaveformCanvas(tk.Canvas):
 
             # 波形颜色
             color = '#2196F3' if sig_type == 'input' else '#F44336'
-            z_color = '#FF9800'  # Z状态用橙色
+            z_color = '#795548'  # Z状态用棕色
 
             prev_x = None
             prev_y = None
