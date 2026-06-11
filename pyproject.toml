@@ -1,0 +1,22 @@
+[project]
+name = "bscanner"
+version = "0.1.0"
+description = "JTAG边界扫描测试工具"
+requires-python = ">=3.13"
+dependencies = [
+    "grako>=3.99.9",
+    "pylink-square>=1.2.0",
+    "pyjtagbs",
+    "ttkbootstrap>=1.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.uv.workspace]
+members = ["pyjtagbs"]
+
+[tool.uv.sources]
+pyjtagbs = { workspace = true }

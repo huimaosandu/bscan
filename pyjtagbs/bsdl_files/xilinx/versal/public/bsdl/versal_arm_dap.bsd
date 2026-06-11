@@ -1,0 +1,196 @@
+-- (c) Copyright 2019-2022 Xilinx, Inc. All rights reserved.
+--
+-- This file contains confidential and proprietary information
+-- of Xilinx, Inc. and is protected under U.S. and
+-- international copyright and other intellectual property
+-- laws.
+--
+-- DISCLAIMER
+-- This disclaimer is not a license and does not grant any
+-- rights to the materials distributed herewith. Except as
+-- otherwise provided in a valid license issued to you by
+-- Xilinx, and to the maximum extent permitted by applicable
+-- law: (1) THESE MATERIALS ARE MADE AVAILABLE "AS IS" AND
+-- WITH ALL FAULTS, AND XILINX HEREBY DISCLAIMS ALL WARRANTIES
+-- AND CONDITIONS, EXPRESS, IMPLIED, OR STATUTORY, INCLUDING
+-- BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, NON-
+-- INFRINGEMENT, OR FITNESS FOR ANY PARTICULAR PURPOSE; and
+-- (2) Xilinx shall not be liable (whether in contract or tort,
+-- including negligence, or under any other theory of
+-- liability) for any loss or damage of any kind or nature
+-- releated to, arising under or in connection with these
+-- materials, including for any direct, or any indirect,
+-- special, incidental, or consequential loss or damage
+-- (including loss of data, profits, goodwill, or any type of
+-- loss or damage suffered as a result of any action brought
+-- by a third party) even if such damage or loss was
+-- reasonably foreseeable or Xilinx had been advised of the
+-- possibility of the same.
+--
+-- CRITICAL APPLICATIONS
+-- Xilinx products are not designed or intended to be fail-
+-- safe, or for use in any application requiring fail-safe
+-- performance, such as life-support or safety devices or
+-- systems, Class III medical devices, nuclear facilities,
+-- applications related to the deployment of airbags, or any
+-- other applications that could lead to death, personal
+-- injury, or severe property or environmental damage
+-- (individually and collectively, "Critical
+-- Applications"). Customer assumes the sole risk and
+-- liability of any use of Xilinx products in Critical
+-- Applications, subject only to applicable laws and
+-- regulations governing limitiations on product liability.
+--
+-- THIS COPYRIGHT NOTICE AND DISCLAIMER MUST BE RETAINED AS
+-- PART OF THIS FILE AT ALL TIMES.
+--
+-- BSDL file for device VERSAL_ARM_DAP, package NONE
+--
+-- Each Versal device behaves like two virtual devices in a JTAG chain,
+-- where each physical Versal device appears as the following two devices
+-- in a JTAG chain:
+--   1. Arm DAP
+--   2. Versal device TAP
+-- This versal_arm_dap.bsd file describes the Arm DAP with IDCODE=0x6BA00477
+-- in Versal series devices whose part codes begin with XCVC, XCVE,
+-- XCVH, XCVM, XCVP, XQVC, XQRVC, or XQVM.
+-- Note: For the Arm DAP with IDCODE=0x4BA06477 in the VERSAL Net series
+-- devices whose part codes begin with XCVN, use the versal_net_arm_dap.bsd
+-- file.
+-- The primary purpose of this BSDL file is to provide the instruction
+-- register length, BYPASS, and IDCODE models for boundary-scan test tools.
+-- Note: Except for BYPASS and IDCODE, functions of the Arm DAP within the
+-- Versal device are only accessible when the Versal device is not protecting
+-- JTAG access. See the JTAG and Boundary-Scan section in the Versal ACAP
+-- Technical Reference Manual (AM011) at http://www.xilinx.com for information
+-- about JTAG interface protections.
+-- See the DESIGN_WARNING section below for additional information.
+------------------------------------------------------------------------
+-- Modification History
+-- | Updated on 10/04/19
+-- | Details -  Initial Release
+--
+-- | Updated on 11/02/20
+-- | Details -  Updated IDCODE version field.
+--
+-- | Updated on 11/03/22
+-- | Details -  Updated DESIGN_WARNING with info about different
+-- |            Versal Net Arm DAP and set TAP_SCAN_CLOCK to lowest
+-- |            supported frequency across all Versal devices.
+------------------------------------------------------------------------
+--
+-- For technical support, www.xilinx.com/support.html -> enter text 'bsdl'
+-- in the text search box.  If none of these Answers resolve the problem,
+-- open a service request at www.xilinx.com/support/service-portal.html
+------------------------------------------------------------------------
+
+entity VERSAL_ARM_DAP is
+
+-- Generic Parameter
+
+generic (PHYSICAL_PIN_MAP : string := "NONE" );
+
+-- Logical Port Description
+
+port (
+    TCK: in bit; --  TCK_0
+    TDI: in bit; --  TDI_0
+    TDO: out bit; --  TDO_0
+    TMS: in bit; --  TMS_0
+    GND: linkage bit
+); --end port list
+
+-- Use Statements
+
+use STD_1149_1_2001.all;
+
+-- Component Conformance Statement(s)
+
+attribute COMPONENT_CONFORMANCE of VERSAL_ARM_DAP : entity is
+    "STD_1149_1_2001";
+
+-- Device Package Pin Mappings
+
+attribute PIN_MAP of VERSAL_ARM_DAP : entity is PHYSICAL_PIN_MAP;
+
+constant NONE: PIN_MAP_STRING:=
+    "TCK:1," &
+    "TDI:2," &
+    "TDO:3," &
+    "TMS:4," &
+    "GND:5";
+
+-- Scan Port Identification
+
+attribute TAP_SCAN_IN    of TDI : signal is true;
+attribute TAP_SCAN_MODE  of TMS : signal is true;
+attribute TAP_SCAN_OUT   of TDO : signal is true;
+attribute TAP_SCAN_CLOCK of TCK : signal is (30.0e6, BOTH);
+
+-- Instruction Register Description
+
+attribute INSTRUCTION_LENGTH of VERSAL_ARM_DAP : entity is 4;
+
+attribute INSTRUCTION_OPCODE of VERSAL_ARM_DAP : entity is
+    "IDCODE     (1110)," & -- DEVICE_ID
+    "BYPASS     (1111)," & -- BYPASS
+    "ABORT      (1000)," & -- PRIVATE
+    "DPACC      (1010)," & -- PRIVATE
+    "APACC      (1011)," & -- PRIVATE
+    "EXTEST     (0000)," & -- DOES NOT EXIST; Defined to satisfy 1149.1
+    "SAMPLE     (0001)," & -- DOES NOT EXIST; Defined to satisfy 1149.1
+    "PRELOAD    (0001)";   -- DOES NOT EXIST; Defined to satisfy 1149.1
+
+attribute INSTRUCTION_CAPTURE of VERSAL_ARM_DAP : entity is
+    "XX01";
+
+attribute INSTRUCTION_PRIVATE of VERSAL_ARM_DAP : entity is
+    "ABORT," &
+    "DPACC," &
+    "APACC";
+
+-- Optional Register Description
+
+attribute IDCODE_REGISTER of VERSAL_ARM_DAP : entity is
+    "0110" &                -- version
+    "1011101000000000" &    -- family
+    "01000111011" &         -- manufacturer
+    "1";                    -- required by 1149.1
+
+
+-- Register Access Description
+
+attribute REGISTER_ACCESS of VERSAL_ARM_DAP : entity is
+    "BYPASS (BYPASS)," &
+    "DEVICE_ID (IDCODE)," &
+    "BOUNDARY (SAMPLE,PRELOAD,EXTEST)";
+
+-- Boundary-Scan Register Description -- DOES NOT EXIST; Defined to satisfy 1149.1
+
+attribute BOUNDARY_LENGTH of VERSAL_ARM_DAP : entity is 1;
+
+attribute BOUNDARY_REGISTER of VERSAL_ARM_DAP : entity is
+    "   0 (BC_2, *, internal, 1)";
+
+
+-- Design Warning Section
+
+attribute DESIGN_WARNING of VERSAL_ARM_DAP : entity is
+    "This is a preliminary BSDL file which has not been verified. " &
+    "This versal_arm_dap.bsd file describes the Arm DAP with IDCODE=0x6BA00477 " &
+        "in Versal series devices whose part codes begin with XCVC, XCVE, " &
+        "XCVH, XCVM, XCVP, XQVC, XQRVC, or XQVM. " &
+        "Note: For the Arm DAP with IDCODE=0x4BA06477 in the VERSAL Net series " &
+        "devices whose part codes begin with XCVN, use the versal_net_arm_dap.bsd " &
+        "file." &
+    "During boundary-scan test, use only the IDCODE or BYPASS instructions." &
+        "Do NOT use the EXTEST, SAMPLE, or PRELOAD instructions." &
+        "The Arm DAP does not have a boundary-scan register." &
+        "The EXTEST instruction, SAMPLE instruction, PRELOAD instruction, " &
+        "BOUNDARY_LENGTH attribute, and BOUNDARY_REGISTER attribute are defined " &
+        "within this BSDL file in order to satisfy IEEE Std 1149.1 BSDL " &
+        "reader requirements, but the Arm DAP does not support " &
+        "these instructions and the associated boundary-register.";
+
+end VERSAL_ARM_DAP;
+

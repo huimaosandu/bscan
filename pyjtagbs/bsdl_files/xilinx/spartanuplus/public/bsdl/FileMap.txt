@@ -1,0 +1,60 @@
+#
+# Xilinx Public Data Mapping File
+# Copyright 2015-2020
+#
+bsd-file-mapping {
+  xcsu10p_cmva361_1LV_i_	xcsu10p_cmva361.bsd
+  xcsu10p_cmva361_1L_i_	xcsu10p_cmva361.bsd
+  xcsu10p_cmva361_1_e_	xcsu10p_cmva361.bsd
+  xcsu10p_cmva361_1_i_	xcsu10p_cmva361.bsd
+  xcsu10p_cmva361_2_e_	xcsu10p_cmva361.bsd
+  xcsu10p_cmva361_2_i_	xcsu10p_cmva361.bsd
+  xcsu10p_cmva529_1LV_i_	In_Development
+  xcsu10p_cmva529_1L_i_	In_Development
+  xcsu10p_cmva529_1_e_	In_Development
+  xcsu10p_cmva529_1_i_	In_Development
+  xcsu10p_cmva529_2_e_	In_Development
+  xcsu10p_cmva529_2_i_	In_Development
+  xcsu10p_sbvb625_1LV_i_	In_Development
+  xcsu10p_sbvb625_1L_i_	In_Development
+  xcsu10p_sbvb625_1_e_	In_Development
+  xcsu10p_sbvb625_1_i_	In_Development
+  xcsu10p_sbvb625_2_e_	In_Development
+  xcsu10p_sbvb625_2_i_	In_Development
+  xcsu25p_cmva361_1LV_i_	xcsu25p_cmva361.bsd
+  xcsu25p_cmva361_1L_i_	xcsu25p_cmva361.bsd
+  xcsu25p_cmva361_1_e_	xcsu25p_cmva361.bsd
+  xcsu25p_cmva361_1_i_	xcsu25p_cmva361.bsd
+  xcsu25p_cmva361_2_e_	xcsu25p_cmva361.bsd
+  xcsu25p_cmva361_2_i_	xcsu25p_cmva361.bsd
+  xcsu25p_cmva529_1LV_i_	In_Development
+  xcsu25p_cmva529_1L_i_	In_Development
+  xcsu25p_cmva529_1_e_	In_Development
+  xcsu25p_cmva529_1_i_	In_Development
+  xcsu25p_cmva529_2_e_	In_Development
+  xcsu25p_cmva529_2_i_	In_Development
+  xcsu25p_sbvb625_1LV_i_	In_Development
+  xcsu25p_sbvb625_1L_i_	In_Development
+  xcsu25p_sbvb625_1_e_	In_Development
+  xcsu25p_sbvb625_1_i_	In_Development
+  xcsu25p_sbvb625_2_e_	In_Development
+  xcsu25p_sbvb625_2_i_	In_Development
+  xcsu35p_cmva361_1LV_i_	xcsu35p_cmva361.bsd
+  xcsu35p_cmva361_1L_i_	xcsu35p_cmva361.bsd
+  xcsu35p_cmva361_1_e_	xcsu35p_cmva361.bsd
+  xcsu35p_cmva361_1_i_	xcsu35p_cmva361.bsd
+  xcsu35p_cmva361_2_e_	xcsu35p_cmva361.bsd
+  xcsu35p_cmva361_2_i_	xcsu35p_cmva361.bsd
+  xcsu35p_cmva529_1LV_i_	xcsu35p_cmva529.bsd
+  xcsu35p_cmva529_1L_i_	xcsu35p_cmva529.bsd
+  xcsu35p_cmva529_1_e_	xcsu35p_cmva529.bsd
+  xcsu35p_cmva529_1_i_	xcsu35p_cmva529.bsd
+  xcsu35p_cmva529_2_e_	xcsu35p_cmva529.bsd
+  xcsu35p_cmva529_2_i_	xcsu35p_cmva529.bsd
+  xcsu35p_sbvb625_1LV_i_	xcsu35p_sbvb625.bsd
+  xcsu35p_sbvb625_1L_i_	xcsu35p_sbvb625.bsd
+  xcsu35p_sbvb625_1_e_	xcsu35p_sbvb625.bsd
+  xcsu35p_sbvb625_1_i_	xcsu35p_sbvb625.bsd
+  xcsu35p_sbvb625_2_e_	xcsu35p_sbvb625.bsd
+  xcsu35p_sbvb625_2_i_	xcsu35p_sbvb625.bsd
+}
