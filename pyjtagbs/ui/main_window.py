@@ -411,36 +411,51 @@ class MainWindow:
 
         # 如果正在连续扫描中，不处理（由 Run/Stop 控制）
         if self._continuous_running:
+            print(f'[DEBUG _on_mode_changed] 连续扫描运行中，跳过模式切换')
             return
 
         mode = self._mode_var.get().strip().lower()
+        print(f'\n[DEBUG _on_mode_changed] >>> 模式切换: {mode}')
         try:
             if mode == 'extest':
+                print(f'  - 进入 EXTEST 模式...')
                 # 进入 EXTEST 前，先捕获当前引脚状态并同步到 _output_bits
                 # 这样可防止进入 EXTEST 瞬间因 _output_bits 全 0 导致所有引脚跳变
+                print(f'  - 调用 capture_current_state()...')
                 self._jc.capture_current_state(self._dev_num)
+                print(f'  - capture_current_state() 完成')
 
                 self._extest_mode = True
                 self._pin_z_set.clear()
+                print(f'  - 设置 scan_mode 为 extest...')
                 self._jc.set_scan_mode(self._dev_num, 'extest')
 
                 # 执行首次 EXTEST scan()，将同步好的状态推送到硬件
+                print(f'  - 执行首次 EXTEST scan()...')
                 self._jc.scan()
+                print(f'  - 首次 scan() 完成')
 
                 self._last_scan_mode = 'extest'
                 self._status_var.set('已进入 EXTEST 模式 - 所有引脚保持当前状态（高阻）')
                 self._update_grid_mode_label()
+                print(f'  - [OK] 已进入 EXTEST 模式')
             else:
+                print(f'  - 退出 EXTEST 模式，回到 SAMPLE...')
                 # 退出 EXTEST 模式，回到 SAMPLE
                 if self._extest_mode:
                     self._extest_mode = False
                     self._pin_z_set.clear()
                     self._extest_pin_states.clear()
+                print(f'  - 设置 scan_mode 为 sample...')
                 self._jc.set_scan_mode(self._dev_num, 'sample')
+                print(f'  - 执行 SAMPLE scan()...')
                 self._jc.scan()
+                print(f'  - SAMPLE scan() 完成')
                 self._last_scan_mode = 'sample'
                 self._status_var.set('已进入 SAMPLE 模式')
                 self._update_grid_mode_label()
+                print(f'  - [OK] 已进入 SAMPLE 模式')
+            print(f'[DEBUG _on_mode_changed] <<< 模式切换完成\n')
         except Exception as e:
             messagebox.showerror('模式切换错误', str(e))
 
@@ -533,9 +548,19 @@ class MainWindow:
 
     def _continuous_scan_loop(self, interval_ms):
         """连续扫描线程"""
+        print(f'\n[DEBUG _continuous_scan_loop] >>> 连续扫描线程启动, interval={interval_ms}ms')
+        loop_count = 0
         while self._continuous_running:
-            self._do_sample_scan()
+            loop_count += 1
+            # print(f'[DEBUG _continuous_scan_loop] 第 {loop_count} 次循环')
+            try:
+                self._do_sample_scan()
+            except Exception as e:
+                print(f'[DEBUG _continuous_scan_loop] ⚠️ _do_sample_scan() 异常: {e}')
+                import traceback
+                traceback.print_exc()
             time.sleep(interval_ms / 1000.0)
+        print(f'[DEBUG _continuous_scan_loop] <<< 连续扫描线程退出, 共执行 {loop_count} 次循环\n')
 
     def _do_sample_scan(self):
         """执行一次扫描（线程安全，通过 after 更新 UI）"""
@@ -545,23 +570,47 @@ class MainWindow:
             t0 = time.perf_counter()
             scan_mode = 'extest' if self._extest_mode else 'sample'
 
+            print(f'[DEBUG _do_sample_scan] >>> 开始扫描, mode={scan_mode}, extest_mode={self._extest_mode}')
+
             # 用锁保护：防止与主线程 _extest_set_pin 同时操作 JTAG 硬件
             with self._jtag_lock:
+                print(f'[DEBUG _do_sample_scan] [LOCKED] 获取锁')
                 if not hasattr(self, '_last_scan_mode') or self._last_scan_mode != scan_mode:
+                    print(f'[DEBUG _do_sample_scan] 切换模式: {self._last_scan_mode} -> {scan_mode}')
                     self._jc.set_scan_mode(self._dev_num, scan_mode)
                     self._last_scan_mode = scan_mode
+                else:
+                    print(f'[DEBUG _do_sample_scan] 模式未变化: {scan_mode}')
 
+                print(f'[DEBUG _do_sample_scan] 执行 scan()...')
                 self._jc.scan()
+                print(f'[DEBUG _do_sample_scan] scan() 完成')
+            
+            print(f'[DEBUG _do_sample_scan] [UNLOCKED] 释放锁')
 
             states = {}
             pin_type = 'output' if self._extest_mode else 'input'
 
+            # 🔍 调试：打印第一个和最后一个引脚的状态
+            debug_pins = ['PS_MIO0', 'PS_MIO51']
+            print(f'[DEBUG _do_sample_scan] 读取引脚状态 (pin_type={pin_type}):')
+            
             for name in self._pin_names:
                 if name in self._pin_z_set:
                     states[name] = 2
                 else:
                     try:
-                        states[name] = self._jc.get_pin_state(self._dev_num, name, pin_type)
+                        val = self._jc.get_pin_state(self._dev_num, name, pin_type)
+                        states[name] = val
+                        # 打印调试引脚的状态
+                        if name in debug_pins:
+                            reg = self._io_regs.get(name, {})
+                            if 'output' in reg and 'oe' in reg:
+                                output_idx = reg['output']
+                                oe_idx = reg['oe']
+                                output_val = self._jc._output_bits[self._dev_num][output_idx] if self._dev_num in self._jc._output_bits and output_idx < len(self._jc._output_bits[self._dev_num]) else 'N/A'
+                                oe_val = self._jc._output_bits[self._dev_num][oe_idx] if self._dev_num in self._jc._output_bits and oe_idx < len(self._jc._output_bits[self._dev_num]) else 'N/A'
+                                print(f'  {name}: get_pin_state={val}, _output_bits[output]={output_val}, _output_bits[oe]={oe_val}')
                     except Exception:
                         states[name] = -1
 
@@ -614,45 +663,107 @@ class MainWindow:
             messagebox.showwarning('提示', '请先连接设备')
             return
 
+        print(f'\n[DEBUG _extest_set_pin] >>> 开始设置 {pin_name} -> {mode}')
+        print(f'  - _extest_mode: {self._extest_mode}')
+        print(f'  - _continuous_running: {self._continuous_running}')
+        
         # 如果不在 EXTEST 模式，自动切换（会先捕获当前状态）
         if not self._extest_mode:
+            print(f'  - 不在 EXTEST 模式，触发自动切换...')
             self._mode_var.set('extest')
+            print(f'  - 已触发模式切换，返回等待用户再次操作')
             return  # _on_mode_changed 会处理切换；用户再次右键选择即可
 
         dev = self._dev_num
         try:
+            print(f'  - 设备号: {dev}')
+            print(f'  - 获取锁...')
             # 用锁保护：防止连续扫描线程与此处同时操作 _output_bits / JTAG 硬件
             with self._jtag_lock:
+                print(f'  - [LOCKED] 已获取锁')
+                
+                # 🔍 打印设置前的 _output_bits 状态
+                if dev in self._jc._output_bits:
+                    bits = self._jc._output_bits[dev]
+                    reg = self._io_regs.get(pin_name, {})
+                    if 'output' in reg and 'oe' in reg:
+                        output_idx = reg['output']
+                        oe_idx = reg['oe']
+                        oe_disable = reg.get('oe_disable', 1)
+                        print(f'  - [BEFORE] {pin_name}: output[{output_idx}]={bits[output_idx] if output_idx < len(bits) else "N/A"}, oe[{oe_idx}]={bits[oe_idx] if oe_idx < len(bits) else "N/A"}')
+                        print(f'  - [CONFIG] {pin_name}: oe_disable={oe_disable} (0=active-high, 1=active-low)')
+                
                 if mode == 'Z':
+                    print(f'  - [ACTION] 设置 {pin_name} OE=False (高阻)')
                     self._jc.set_pin_state(dev, pin_name, False, 'oe')
                     self._pin_z_set.add(pin_name)
                     val = 2
                 elif mode == '1':
+                    print(f'  - [ACTION] 设置 {pin_name} OE=True, output=True')
                     self._jc.set_pin_state(dev, pin_name, True, 'oe')
                     self._jc.set_pin_state(dev, pin_name, True, 'output')
                     self._pin_z_set.discard(pin_name)
                     val = 1
                 elif mode == '0':
+                    print(f'  - [ACTION] 设置 {pin_name} OE=True, output=False')
                     self._jc.set_pin_state(dev, pin_name, True, 'oe')
                     self._jc.set_pin_state(dev, pin_name, False, 'output')
                     self._pin_z_set.discard(pin_name)
                     val = 0
                 else:
+                    print(f'  - [ERROR] 无效模式: {mode}')
                     return
+                
+                # 🔍 打印设置后的 _output_bits 状态
+                if dev in self._jc._output_bits:
+                    bits = self._jc._output_bits[dev]
+                    reg = self._io_regs.get(pin_name, {})
+                    if 'output' in reg and 'oe' in reg:
+                        output_idx = reg['output']
+                        oe_idx = reg['oe']
+                        print(f'  - [AFTER] {pin_name}: output[{output_idx}]={bits[output_idx] if output_idx < len(bits) else "N/A"}, oe[{oe_idx}]={bits[oe_idx] if oe_idx < len(bits) else "N/A"}')
 
                 # 记录用户手动设置的显示值，防止被连续扫描的 UI 刷新覆盖
                 self._extest_pin_states[pin_name] = val
+                print(f'  - 已记录 _extest_pin_states[{pin_name}] = {val}')
 
                 # 如果没有连续扫描线程在跑，需要自己触发一次 scan() 推送到硬件
                 # 如果有连续扫描线程，它会在下一个周期自动推送（已持锁，线程会等锁释放后推送）
                 if not self._continuous_running:
+                    print(f'  - [SCAN] 无连续扫描，立即执行 scan() 推送到硬件')
+                    
+                    # 🔍 关键修复：强制重新加载 EXTEST 指令
+                    print(f'  - [SCAN] 强制重置 IR 缓存，重新加载 EXTEST 指令')
+                    self._jc._last_ir_opcode = None
                     self._jc.scan()
+                    print(f'  - [SCAN] scan() 完成')
+                    
+                    # 🔍 立即读取验证
+                    try:
+                        verify_output = self._jc.get_pin_state(dev, pin_name, 'output')
+                        verify_oe = self._jc.get_pin_state(dev, pin_name, 'oe')
+                        print(f'  - [VERIFY] 立即读取: output={verify_output}, oe={verify_oe}')
+                    except Exception as e:
+                        print(f'  - [VERIFY] 读取失败: {e}')
+                else:
+                    print(f'  - [SCAN] 有连续扫描运行，等待下一周期自动推送')
+                    # 🔍 关键修复：即使有连续扫描，也强制重新加载 EXTEST 指令
+                    print(f'  - [SCAN] 强制重置 IR 缓存，确保下一周期使用正确的指令')
+                    self._jc._last_ir_opcode = None
+            
+            print(f'  - [UNLOCKED] 已释放锁')
 
             # 更新 UI（在锁外执行，避免长时间持锁）
+            print(f'  - [UI] 更新网格显示: {pin_name} -> {val}')
             self._sample_grid.update_states({pin_name: val})
-            self._tree.set(pin_name, 'value', 'Z' if mode == 'Z' else str(val))
+            display_val = 'Z' if mode == 'Z' else str(val)
+            print(f'  - [UI] 更新引脚表: {pin_name} -> {display_val}')
+            self._tree.set(pin_name, 'value', display_val)
+            print(f'  - [UI] 更新波形图')
             self._waveform.append_samples({pin_name: {'output': val}})
+            print(f'  - [STATUS] 设置状态栏文本')
             self._status_var.set(f'EXTEST: {pin_name} -> {mode}')
+            print(f'[DEBUG _extest_set_pin] <<< 设置完成\n')
 
         except Exception as e:
             messagebox.showerror('EXTEST 错误', f'设置 {pin_name} 失败: {e}')
@@ -784,9 +895,12 @@ class MainWindow:
     def _on_tree_right_click(self, event):
         """引脚表右键菜单"""
         item = self._tree.identify_row(event.y)
+        print(f'\n[DEBUG _on_tree_right_click] 右键点击: y={event.y}, item={item}')
         if item:
             self._tree.selection_set(item)
             pin_name = item
+            print(f'[DEBUG _on_tree_right_click] 选中引脚: {pin_name}')
+            print(f'[DEBUG _on_tree_right_click] _extest_mode: {self._extest_mode}')
 
             menu = tk.Menu(self.root, tearoff=0)
             menu.add_command(label=f'添加 {pin_name} (input) 到波形',
@@ -799,18 +913,45 @@ class MainWindow:
 
             # EXTEST 模式下添加引脚设置选项
             if self._extest_mode:
+                print(f'[DEBUG _on_tree_right_click] 添加 EXTEST 菜单项')
                 menu.add_separator()
-                extest_menu = tk.Menu(menu, tearoff=0)
-                extest_menu.add_command(
-                    label='Set to 0 (输出低)',
-                    command=lambda: self._extest_set_pin(pin_name, '0'))
-                extest_menu.add_command(
-                    label='Set to 1 (输出高)',
-                    command=lambda: self._extest_set_pin(pin_name, '1'))
-                extest_menu.add_command(
-                    label='Set to Z (高阻)',
-                    command=lambda: self._extest_set_pin(pin_name, 'Z'))
-                menu.add_cascade(label=f'EXTEST 设置 {pin_name}', menu=extest_menu)
+                        
+                # 🔍 测试：直接调用，不使用 partial 或 lambda
+                def test_callback_0():
+                    print(f'[DEBUG TEST CALLBACK] 直接调用 _extest_set_pin({pin_name}, "0")')
+                    try:
+                        self._extest_set_pin(pin_name, '0')
+                        print(f'[DEBUG TEST CALLBACK] 调用成功')
+                    except Exception as e:
+                        print(f'[DEBUG TEST CALLBACK] 调用失败: {e}')
+                        import traceback
+                        traceback.print_exc()
+                        
+                def test_callback_1():
+                    print(f'[DEBUG TEST CALLBACK] 直接调用 _extest_set_pin({pin_name}, "1")')
+                    try:
+                        self._extest_set_pin(pin_name, '1')
+                        print(f'[DEBUG TEST CALLBACK] 调用成功')
+                    except Exception as e:
+                        print(f'[DEBUG TEST CALLBACK] 调用失败: {e}')
+                        import traceback
+                        traceback.print_exc()
+                        
+                def test_callback_z():
+                    print(f'[DEBUG TEST CALLBACK] 直接调用 _extest_set_pin({pin_name}, "Z")')
+                    try:
+                        self._extest_set_pin(pin_name, 'Z')
+                        print(f'[DEBUG TEST CALLBACK] 调用成功')
+                    except Exception as e:
+                        print(f'[DEBUG TEST CALLBACK] 调用失败: {e}')
+                        import traceback
+                        traceback.print_exc()
+                        
+                menu.add_command(label=f'TEST: Set {pin_name} to 0 (输出低)', command=test_callback_0)
+                menu.add_command(label=f'TEST: Set {pin_name} to 1 (输出高)', command=test_callback_1)
+                menu.add_command(label=f'TEST: Set {pin_name} to Z (高阻)', command=test_callback_z)
+                        
+                print(f'[DEBUG _on_tree_right_click] EXTEST 菜单项已添加')
 
             menu.post(event.x_root, event.y_root)
         else:
