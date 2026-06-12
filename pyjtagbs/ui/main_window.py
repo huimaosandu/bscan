@@ -18,6 +18,22 @@
 #   4. [Bug Fix] _extest_set_pin() - 移除所有调试 print；修复自动切换
 #      EXTEST 模式的逻辑（改为触发 _mode_var.set 走统一切换流程）；
 #      scan() 调用保留，依赖 pylinkbs.py 的 IR 缓存保证安全性。
+#
+# 修改日期: 2025-06-12（第二次）
+# 修改内容:
+#   5. [Bug Fix] 线程竞争导致 Set to 0/1/Z 无反应：
+#      __init__ 中新增 self._jtag_lock (threading.Lock) 和
+#      self._extest_pin_states (dict)。
+#      _extest_set_pin() 和 _do_sample_scan() 共用同一把锁，
+#      确保主线程写 _output_bits 和后台扫描线程推送 BSR 不会交叉执行。
+#   6. [Bug Fix] 连续扫描 UI 刷新覆盖手动设置的显示值：
+#      _update_ui_after_scan() 在 EXTEST 模式下，用 _extest_pin_states
+#      覆盖扫描读回值，保证用户手动设置的引脚显示值不被刷新覆盖。
+#   7. [Bug Fix] _extest_set_pin() 在连续扫描运行时不再自己调 scan()，
+#      由扫描线程统一在获得锁后推送，避免双重 scan() 竞争。
+#      仅在无连续扫描时才在持锁内自己 scan()。
+#   8. 所有 EXTEST 退出路径（_on_mode_changed/_on_run_toggle/
+#      _on_change_bsdl）均加入 _extest_pin_states.clear()。
 # ============================================================
 """
 import os
@@ -60,6 +76,8 @@ class MainWindow:
         self._extest_mode = False
         self._pin_z_set = set()        # 当前设为 Z 的引脚
         self._linked_pins = set()      # linkage 引脚集合
+        self._extest_pin_states = {}   # 用户手动设置的引脚显示值 {name: val}
+        self._jtag_lock = threading.Lock()  # 保护 JTAG 操作的互斥锁
 
         # BSDL 自动匹配
         self._device_infos = []        # 链中所有设备信息
@@ -417,6 +435,7 @@ class MainWindow:
                 if self._extest_mode:
                     self._extest_mode = False
                     self._pin_z_set.clear()
+                    self._extest_pin_states.clear()
                 self._jc.set_scan_mode(self._dev_num, 'sample')
                 self._jc.scan()
                 self._last_scan_mode = 'sample'
@@ -475,6 +494,7 @@ class MainWindow:
             if self._extest_mode:
                 self._extest_mode = False
                 self._pin_z_set.clear()
+                self._extest_pin_states.clear()
                 self._jc.set_scan_mode(self._dev_num, 'sample')
                 self._jc.scan()
                 self._mode_var.set('sample')
@@ -525,22 +545,20 @@ class MainWindow:
             t0 = time.perf_counter()
             scan_mode = 'extest' if self._extest_mode else 'sample'
 
-            # 仅在模式切换时调用 set_scan_mode（内部会重置 IR 缓存）
-            if not hasattr(self, '_last_scan_mode') or self._last_scan_mode != scan_mode:
-                self._jc.set_scan_mode(self._dev_num, scan_mode)
-                self._last_scan_mode = scan_mode
+            # 用锁保护：防止与主线程 _extest_set_pin 同时操作 JTAG 硬件
+            with self._jtag_lock:
+                if not hasattr(self, '_last_scan_mode') or self._last_scan_mode != scan_mode:
+                    self._jc.set_scan_mode(self._dev_num, scan_mode)
+                    self._last_scan_mode = scan_mode
 
-            # 无论 SAMPLE 还是 EXTEST，都需要执行 scan()：
-            # - SAMPLE 模式：读取引脚输入状态
-            # - EXTEST 模式：将 _output_bits 推送到硬件并读回反馈
-            self._jc.scan()
+                self._jc.scan()
 
             states = {}
             pin_type = 'output' if self._extest_mode else 'input'
 
             for name in self._pin_names:
                 if name in self._pin_z_set:
-                    states[name] = 2  # Z 状态标记
+                    states[name] = 2
                 else:
                     try:
                         states[name] = self._jc.get_pin_state(self._dev_num, name, pin_type)
@@ -558,15 +576,22 @@ class MainWindow:
 
     def _update_ui_after_scan(self, states, scan_ms):
         """在主线程更新 UI"""
+        # EXTEST 模式下，用户手动 Set to 0/1/Z 的引脚，显示值以 _extest_pin_states 为准，
+        # 不被连续扫描读回的 _output_bits 值覆盖（_output_bits 读回值理论上应一致，
+        # 但可因 linkage/input-only 引脚等情况产生干扰）
+        if self._extest_mode and self._extest_pin_states:
+            states = dict(states)
+            states.update(self._extest_pin_states)
+
         for name, val in states.items():
-            self._tree.set(name, 'value', str(val))
+            display = 'Z' if val == 2 else str(val)
+            self._tree.set(name, 'value', display)
         self._sample_grid.update_states(states)
-        
-        # EXTEST 模式下使用 output 数据，SAMPLE 模式下使用 input 数据
+
         data_key = 'output' if self._extest_mode else 'input'
         waveform_data = {n: {data_key: v} for n, v in states.items()}
         self._waveform.append_samples(waveform_data)
-        
+
         self._count_var.set(f'扫描: #{self._scan_count} ({scan_ms:.1f}ms)')
 
     def _update_grid_mode_label(self):
@@ -596,36 +621,37 @@ class MainWindow:
 
         dev = self._dev_num
         try:
-            if mode == 'Z':
-                # 禁用输出使能 -> 高阻
-                self._jc.set_pin_state(dev, pin_name, False, 'oe')
-                self._pin_z_set.add(pin_name)
-                val = 2  # Z 状态标记
-            elif mode == '1':
-                # 使能输出 + 输出高
-                self._jc.set_pin_state(dev, pin_name, True, 'oe')
-                self._jc.set_pin_state(dev, pin_name, True, 'output')
-                self._pin_z_set.discard(pin_name)
-                val = 1
-            elif mode == '0':
-                # 使能输出 + 输出低
-                self._jc.set_pin_state(dev, pin_name, True, 'oe')
-                self._jc.set_pin_state(dev, pin_name, False, 'output')
-                self._pin_z_set.discard(pin_name)
-                val = 0
-            else:
-                return
+            # 用锁保护：防止连续扫描线程与此处同时操作 _output_bits / JTAG 硬件
+            with self._jtag_lock:
+                if mode == 'Z':
+                    self._jc.set_pin_state(dev, pin_name, False, 'oe')
+                    self._pin_z_set.add(pin_name)
+                    val = 2
+                elif mode == '1':
+                    self._jc.set_pin_state(dev, pin_name, True, 'oe')
+                    self._jc.set_pin_state(dev, pin_name, True, 'output')
+                    self._pin_z_set.discard(pin_name)
+                    val = 1
+                elif mode == '0':
+                    self._jc.set_pin_state(dev, pin_name, True, 'oe')
+                    self._jc.set_pin_state(dev, pin_name, False, 'output')
+                    self._pin_z_set.discard(pin_name)
+                    val = 0
+                else:
+                    return
 
-            # 执行扫描，将设置应用到硬件
-            # scan() 内部已有 IR 缓存，不会重复写 IR，TAP 不会跑飞
-            self._jc.scan()
+                # 记录用户手动设置的显示值，防止被连续扫描的 UI 刷新覆盖
+                self._extest_pin_states[pin_name] = val
 
-            # 更新 UI
+                # 如果没有连续扫描线程在跑，需要自己触发一次 scan() 推送到硬件
+                # 如果有连续扫描线程，它会在下一个周期自动推送（已持锁，线程会等锁释放后推送）
+                if not self._continuous_running:
+                    self._jc.scan()
+
+            # 更新 UI（在锁外执行，避免长时间持锁）
             self._sample_grid.update_states({pin_name: val})
             self._tree.set(pin_name, 'value', 'Z' if mode == 'Z' else str(val))
-            waveform_data = {pin_name: {'output': val}}
-            self._waveform.append_samples(waveform_data)
-
+            self._waveform.append_samples({pin_name: {'output': val}})
             self._status_var.set(f'EXTEST: {pin_name} -> {mode}')
 
         except Exception as e:
@@ -694,6 +720,7 @@ class MainWindow:
             if self._extest_mode:
                 self._extest_mode = False
                 self._pin_z_set.clear()
+                self._extest_pin_states.clear()
                 self._jc.set_scan_mode(self._dev_num, 'sample')
                 self._mode_var.set('sample')
 
