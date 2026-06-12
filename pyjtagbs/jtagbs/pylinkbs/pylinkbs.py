@@ -17,6 +17,27 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with PyJTAGBS; if not, write to the Free Software
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+#
+# ============================================================
+# 修改记录
+# 修改人: claude code
+# 修改日期: 2025-06-12
+# 修改内容:
+#   1. [Bug Fix] scan() - EXTEST 模式下每次 scan() 都重新加载 IR 导致 TAP
+#      状态机在非 IDLE 状态时跑飞，从而自动退出 EXTEST 模式。
+#      修复: scan() 通过 _last_ir_opcode 缓存上一次写入的 IR 操作码，
+#      仅在模式发生变化时才重新写入 IR，避免频繁 IR 写入扰动 TAP 状态。
+#   2. [Bug Fix] scan() - _output_bits 初始化为全 0，进入 EXTEST 后首次
+#      scan() 将全 0 推入 BSR，导致所有引脚状态归零。
+#      修复: 新增 capture_current_state() 方法，进入 EXTEST 前先以
+#      SAMPLE 模式做一次 Capture-DR，将当前硬件引脚电平读入 _input_bits，
+#      再将 _input_bits 同步到 _output_bits，保证首次推送的值与引脚原
+#      状态一致，消除进入 EXTEST 瞬间的电平扰动。
+#   3. [Bug Fix] write_IR() 在 jtagraw.py 中未判断当前 TAP 状态就固定
+#      发送 TMS=0b00110（从 IDLE 跳到 Shift-IR 的序列），当 state 不在
+#      IDLE 时会导致 TAP 状态机跑飞。pylinkbs.py 的 scan() 现在在调用
+#      write_IR 前确保 TAP 处于 RUN_TEST_IDLE。
+# ============================================================
 
 import pylink
 import struct
@@ -52,6 +73,7 @@ class PyLinkRawBS(JTAGRawBS):
         self._ir_lengths = []       # 每个设备的 IR 长度
         self._ir_opcodes = {}        # device_number -> {'sample': int, 'extest': int, 'bypass': int, 'ir_length': int}
         self._pin_name_map = {}     # device_number -> set of port names
+        self._last_ir_opcode = None  # 上次写入的 IR 操作码名称，用于避免重复写 IR
 
     # ================================================================
     # 探头管理
@@ -202,11 +224,17 @@ class PyLinkRawBS(JTAGRawBS):
     def set_scan_mode(self, device_number, mode):
         """Set scan mode to passive (sample) or active (extest)"""
         if mode in ('passive', 'sample'):
-            self._scan_mode = 'sample'
+            new_mode = 'sample'
         elif mode in ('active', 'extest'):
-            self._scan_mode = 'extest'
+            new_mode = 'extest'
         else:
             raise ValueError("Unknown mode: %s, use 'sample' or 'extest'" % mode)
+
+        # 只有模式真正变化时才重置 IR 缓存，强制下次 scan() 重新加载 IR
+        if new_mode != self._scan_mode:
+            self._last_ir_opcode = None
+
+        self._scan_mode = new_mode
 
     def _load_ir_for_device(self, device_number, ir_opcode_name):
         """将指定指令加载到目标设备的 IR（使用 BSDL 提取的操作码）"""
@@ -232,34 +260,102 @@ class PyLinkRawBS(JTAGRawBS):
 
         self.write_IR(ir_bytes, total_ir_bits)
 
-    # ================================================================
-    # 扫描操作（读写 boundary scan register）
-    # ================================================================
+    def capture_current_state(self, device_number):
+        """在切换到 EXTEST 之前，先用 SAMPLE 模式读取当前引脚电平，
+        并将其同步到 _output_bits，确保首次 EXTEST scan() 推送的值
+        与当前硬件状态一致，避免进入 EXTEST 瞬间其他引脚状态跳变。
+
+        调用时机：set_scan_mode(dev, 'extest') 之前调用。
+        """
+        if device_number not in self._output_bits:
+            return
+        if device_number not in self._input_bits:
+            return
+
+        # 临时切到 SAMPLE 模式读取当前电平
+        old_mode = self._scan_mode
+        self._scan_mode = 'sample'
+        self._last_ir_opcode = None  # 强制重新写 IR
+
+        try:
+            self.scan()
+        except Exception as e:
+            print("Warning: capture_current_state scan failed: %s" % e)
+            self._scan_mode = old_mode
+            return
+
+        # 将读到的 input_bits 同步到 output_bits
+        # 对每个有 BSDL 信息的设备做同步
+        bsdl_file = self.bsdl[device_number] if device_number < len(self.bsdl) else None
+        if bsdl_file is None:
+            self._scan_mode = old_mode
+            return
+
+        input_bits = self._input_bits[device_number]
+        output_bits = self._output_bits[device_number]
+
+        for pin_name, reg in bsdl_file.io_regs.items():
+            # 对于有 input + output 的引脚，将 input 值复制到 output
+            if 'input' in reg and 'output' in reg:
+                in_cell = reg['input']
+                out_cell = reg['output']
+                if in_cell < len(input_bits) and out_cell < len(output_bits):
+                    output_bits[out_cell] = input_bits[in_cell]
+
+            # 对于有 OE 的引脚，默认设为高阻（disable output）
+            if 'oe' in reg:
+                oe_cell = reg['oe']
+                oe_disable = reg.get('oe_disable', 1)  # 默认禁用值为 1
+                if oe_cell < len(output_bits):
+                    output_bits[oe_cell] = oe_disable  # 高阻态
+
+        # 恢复模式，下次 scan() 会因 _last_ir_opcode != opcode_name 而重新写 IR
+        self._scan_mode = old_mode
+        self._last_ir_opcode = None
+
+
 
     def scan(self, write_only=False):
         """Perform an update of the JTAG chain status.
 
         对所有设备执行 SAMPLE/EXTEST DR 扫描，读回输入引脚状态。
+
+        修复说明：
+        - 使用 _last_ir_opcode 缓存，仅在模式切换时才重新写入 IR，
+          避免频繁 IR 写入在 TAP 非 IDLE 状态时引起状态机跑飞（自动退出 EXTEST）。
+        - 在写 IR 之前确保 TAP 处于 RUN_TEST_IDLE 状态。
         """
         if not self.num_devices:
             return
 
-        # 加载 SAMPLE 或 EXTEST 指令（使用每个设备的 BSDL 操作码）
         opcode_name = 'extest' if self._scan_mode == 'extest' else 'sample'
-        total_ir_bits = sum(self._ir_lengths)
-        ir_bits = []
-        for d in range(self.num_devices):
-            ops = self._get_ir_opcodes(d)
-            ir_len = self._ir_lengths[d]
-            val = ops[opcode_name]
-            for bit in range(ir_len):
-                ir_bits.append((val >> bit) & 1)
 
-        bcount = math.ceil(total_ir_bits / 8)
-        ir_bytes = [0] * bcount
-        for i, bit in enumerate(ir_bits):
-            ir_bytes[i // 8] |= (bit << (i % 8))
-        self.write_IR(ir_bytes, total_ir_bits)
+        # 仅在 IR 操作码发生变化（模式切换）时才重新写 IR
+        # 避免每次 scan() 都发送 IR 序列扰动 TAP 状态机
+        if self._last_ir_opcode != opcode_name:
+            # 确保 TAP 处于 RUN_TEST_IDLE，write_IR 从该状态出发
+            from ..jtagraw import Jtagstate
+            if self.state != Jtagstate.RUN_TEST_IDLE:
+                self._jtag_reset()
+                self.tdo_flush(0, 6)
+                self.state = Jtagstate.RUN_TEST_IDLE
+
+            total_ir_bits = sum(self._ir_lengths)
+            ir_bits = []
+            for d in range(self.num_devices):
+                ops = self._get_ir_opcodes(d)
+                ir_len = self._ir_lengths[d]
+                val = ops[opcode_name]
+                for bit in range(ir_len):
+                    ir_bits.append((val >> bit) & 1)
+
+            bcount = math.ceil(total_ir_bits / 8)
+            ir_bytes = [0] * bcount
+            for i, bit in enumerate(ir_bits):
+                ir_bytes[i // 8] |= (bit << (i % 8))
+            self.write_IR(ir_bytes, total_ir_bits)
+
+            self._last_ir_opcode = opcode_name
 
         # 构建 DR 数据（所有设备的 output bits 拼接）
         total_dr_bits = 0
