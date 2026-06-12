@@ -380,8 +380,104 @@ class MainWindow:
                 # 进入 EXTEST 模式
                 self._extest_mode = True
                 self._jc.set_scan_mode(self._dev_num, 'extest')
+                
+                # ⚠️ 重要：进入 EXTEST 后，先将所有引脚设为高阻态（Z），避免意外驱动
+                # 这样可以防止 _output_bits 中的默认值导致引脚闪烁
+                self._pin_z_set.clear()
+                for pin_name in self._pin_names:
+                    reg = self._io_regs.get(pin_name, {})
+                    # 只对具有 output 和 oe 的引脚设置 Z
+                    if 'output' in reg and 'oe' in reg:
+                        try:
+                            # 禁用输出使能 -> 高阻
+                            self._jc.set_pin_state(self._dev_num, pin_name, False, 'oe')
+                            self._pin_z_set.add(pin_name)
+                        except Exception:
+                            pass  # 部分引脚可能不支持
+                
+                # 执行一次扫描，将所有引脚设为高阻态
                 self._jc.scan()
-                self._status_var.set('已进入 EXTEST 模式 - 可右键设置引脚状态')
+                
+                # 🔍 调试：打印 _output_bits 的状态
+                print(f'\n=== DEBUG: 进入 EXTEST 模式后的 _output_bits ===')
+                if self._dev_num in self._jc._output_bits:
+                    bits = self._jc._output_bits[self._dev_num]
+                    print(f'  长度: {len(bits)}')
+                    # 统计 0 和 1 的数量
+                    num_zeros = sum(1 for b in bits if b == 0)
+                    num_ones = sum(1 for b in bits if b == 1)
+                    print(f'  0 的数量: {num_zeros}, 1 的数量: {num_ones}')
+                    # 显示前 50 位
+                    sample = bits[:min(50, len(bits))]
+                    print(f'  前 50 位: {sample}')
+                    # 检查是否有交替的模式（0,1,0,1...）
+                    if len(bits) > 1:
+                        alternating = all(bits[i] != bits[i+1] for i in range(min(20, len(bits)-1)))
+                        print(f'  是否交替模式 (0,1,0,1...): {alternating}')
+                    
+                    # 🎯 关键：打印 PS_MIO0 和 PS_MIO51 的具体值
+                    for pin_name in ['PS_MIO0', 'PS_MIO51']:
+                        reg = self._io_regs.get(pin_name, {})
+                        if 'output' in reg and 'oe' in reg:
+                            output_idx = reg['output']
+                            oe_idx = reg['oe']
+                            output_val = bits[output_idx] if output_idx < len(bits) else 'N/A'
+                            oe_val = bits[oe_idx] if oe_idx < len(bits) else 'N/A'
+                            print(f'  {pin_name}: output[{output_idx}]={output_val}, oe[{oe_idx}]={oe_val}')
+                print('=== END DEBUG ===\n')
+                
+                # ✅ 关键修复：读取当前 BSR 状态并同步到 _output_bits
+                # 这样可以确保后续 scan() 不会改变其他引脚的状态
+                print('--- 步骤: 读取当前 BSR 状态并同步到 _output_bits ---')
+                try:
+                    # 执行一次 SAMPLE 模式的 scan() 来读取当前硬件状态
+                    self._jc.set_scan_mode(self._dev_num, 'sample')
+                    self._jc.scan()
+                    
+                    # 将读取到的 input 状态复制到 output_bits 中
+                    # 这样后续 EXTEST 模式的 scan() 会保持这些值不变
+                    if self._dev_num in self._jc._input_bits and self._dev_num in self._jc._output_bits:
+                        input_bits = self._jc._input_bits[self._dev_num]
+                        output_bits = self._jc._output_bits[self._dev_num]
+                        
+                        # 对于每个引脚，将其 input 状态复制到 output 和 oe 位置
+                        for pin_name in self._pin_names:
+                            reg = self._io_regs.get(pin_name, {})
+                            if 'input' in reg and 'output' in reg:
+                                input_cell = reg['input']
+                                output_cell = reg['output']
+                                oe_cell = reg.get('oe', None)
+                                
+                                if input_cell < len(input_bits):
+                                    input_val = input_bits[input_cell]
+                                    # 将 input 值复制到 output
+                                    if output_cell < len(output_bits):
+                                        output_bits[output_cell] = input_val
+                                    # 将 oe 设为使能（如果存在）
+                                    if oe_cell is not None and oe_cell < len(output_bits):
+                                        # oe_disable=1 表示 oe=0 时使能输出，所以设置为 0
+                                        oe_disable = reg.get('oe_disable', 1)
+                                        output_bits[oe_cell] = 0 if oe_disable else 1
+                        
+                        print(f'  ✓ 已将 {len(self._pin_names)} 个引脚的 input 状态同步到 _output_bits')
+                        
+                        # 🎯 关键：打印同步后 PS_MIO0 和 PS_MIO51 的具体值
+                        for pin_name in ['PS_MIO0', 'PS_MIO51']:
+                            reg = self._io_regs.get(pin_name, {})
+                            if 'output' in reg and 'oe' in reg:
+                                output_idx = reg['output']
+                                oe_idx = reg['oe']
+                                output_val = output_bits[output_idx] if output_idx < len(output_bits) else 'N/A'
+                                oe_val = output_bits[oe_idx] if oe_idx < len(output_bits) else 'N/A'
+                                print(f'  [同步后] {pin_name}: output[{output_idx}]={output_val}, oe[{oe_idx}]={oe_val}')
+                except Exception as e:
+                    print(f'  ⚠️ 同步失败: {e}')
+                
+                # 切回 EXTEST 模式
+                self._jc.set_scan_mode(self._dev_num, 'extest')
+                
+                self._last_scan_mode = 'extest'  # 记录当前模式
+                self._status_var.set(f'已进入 EXTEST 模式 - 所有引脚已设为高阻态 (Z)')
                 self._update_grid_mode_label()
             else:
                 # 退出 EXTEST 模式，回到 SAMPLE
@@ -390,6 +486,7 @@ class MainWindow:
                     self._pin_z_set.clear()
                 self._jc.set_scan_mode(self._dev_num, 'sample')
                 self._jc.scan()
+                self._last_scan_mode = 'sample'  # 记录当前模式
                 self._status_var.set('已进入 SAMPLE 模式')
                 self._update_grid_mode_label()
         except Exception as e:
@@ -448,6 +545,7 @@ class MainWindow:
                 self._jc.set_scan_mode(self._dev_num, 'sample')
                 self._jc.scan()
                 self._mode_var.set('sample')
+                self._last_scan_mode = 'sample'  # 重置模式记录
             self._update_grid_mode_label()
         else:
             # Run
@@ -455,11 +553,27 @@ class MainWindow:
             if mode == 'extest':
                 self._extest_mode = True
                 self._jc.set_scan_mode(self._dev_num, 'extest')
+                
+                # ⚠️ 重要：进入 EXTEST 后，先将所有引脚设为高阻态（Z）
+                self._pin_z_set.clear()
+                for pin_name in self._pin_names:
+                    reg = self._io_regs.get(pin_name, {})
+                    if 'output' in reg and 'oe' in reg:
+                        try:
+                            self._jc.set_pin_state(self._dev_num, pin_name, False, 'oe')
+                            self._pin_z_set.add(pin_name)
+                        except Exception:
+                            pass
+                
+                # 执行一次扫描，将所有引脚设为高阻态
                 self._jc.scan()
+                
+                self._last_scan_mode = 'extest'  # 记录当前模式
             else:
                 self._extest_mode = False
                 self._jc.set_scan_mode(self._dev_num, 'sample')
                 self._jc.scan()
+                self._last_scan_mode = 'sample'  # 记录当前模式
 
             interval_text = self._interval_var.get()
             interval_ms = self._parse_interval(interval_text)
@@ -488,11 +602,31 @@ class MainWindow:
             t0 = time.perf_counter()
             # 根据当前模式扫描
             scan_mode = 'extest' if self._extest_mode else 'sample'
-            self._jc.set_scan_mode(self._dev_num, scan_mode)
-            self._jc.scan()
+            
+            # EXTEST 模式下：只在首次或模式切换时设置 scan_mode
+            # 避免每次扫描都重置，覆盖用户手动设置的引脚状态
+            if not hasattr(self, '_last_scan_mode') or self._last_scan_mode != scan_mode:
+                print(f'[DO_SAMPLE_SCAN] 切换模式: {self._last_scan_mode} -> {scan_mode}')
+                self._jc.set_scan_mode(self._dev_num, scan_mode)
+                self._last_scan_mode = scan_mode
+            
+            # ⚠️ 重要：EXTEST 模式下，不执行 scan()，避免将 _output_bits 中的值加载到 BSR
+            # 只有用户手动 Set to 0/1/Z 时才执行 scan()
+            if self._extest_mode:
+                # EXTEST 模式：只读取当前状态，不执行 scan()
+                # 这样可以避免 _output_bits 中的默认值驱动引脚
+                print(f'[DO_SAMPLE_SCAN] EXTEST 模式，跳过 scan()')
+                pass
+            else:
+                # SAMPLE 模式：正常执行 scan()
+                print(f'[DO_SAMPLE_SCAN] SAMPLE 模式，执行 scan()')
+                self._jc.scan()
 
             states = {}
-            pin_type = 'input'  # SAMPLE 读 input
+            # EXTEST 模式下读取 output 状态（反映边界扫描寄存器中的输出值）
+            # SAMPLE 模式下读取 input 状态
+            pin_type = 'output' if self._extest_mode else 'input'
+            
             for name in self._pin_names:
                 if name in self._pin_z_set:
                     states[name] = 2  # Z 状态
@@ -508,7 +642,10 @@ class MainWindow:
             # 通过 after 在主线程更新 UI
             self.root.after(0, self._update_ui_after_scan, states, scan_ms)
 
-        except Exception:
+        except Exception as e:
+            print(f'[DO_SAMPLE_SCAN] 异常: {e}')
+            import traceback
+            traceback.print_exc()
             pass
 
     def _update_ui_after_scan(self, states, scan_ms):
@@ -516,8 +653,12 @@ class MainWindow:
         for name, val in states.items():
             self._tree.set(name, 'value', str(val))
         self._sample_grid.update_states(states)
-        waveform_data = {n: {'input': v} for n, v in states.items()}
+        
+        # EXTEST 模式下使用 output 数据，SAMPLE 模式下使用 input 数据
+        data_key = 'output' if self._extest_mode else 'input'
+        waveform_data = {n: {data_key: v} for n, v in states.items()}
         self._waveform.append_samples(waveform_data)
+        
         self._count_var.set(f'扫描: #{self._scan_count} ({scan_ms:.1f}ms)')
 
     def _update_grid_mode_label(self):
@@ -549,6 +690,22 @@ class MainWindow:
         
         dev = self._dev_num
         try:
+            # 🔍 调试：打印设置前的 _output_bits 状态
+            print(f'\n=== DEBUG: 设置 {pin_name} -> {mode} 前 ===')
+            before_bits = None
+            if dev in self._jc._output_bits:
+                bits = self._jc._output_bits[dev]
+                before_bits = bits[:]  # 复制一份
+                num_ones = sum(1 for b in bits if b == 1)
+                print(f'  _output_bits 中 1 的数量: {num_ones}/{len(bits)}')
+                # 获取该引脚对应的 output 和 oe 位索引
+                reg = self._io_regs.get(pin_name, {})
+                if 'output' in reg and 'oe' in reg:
+                    output_idx = reg['output']
+                    oe_idx = reg['oe']
+                    print(f'  {pin_name}: output[{output_idx}]={bits[output_idx] if output_idx < len(bits) else "N/A"}, oe[{oe_idx}]={bits[oe_idx] if oe_idx < len(bits) else "N/A"}')
+            print('=== END DEBUG ===\n')
+            
             if mode == 'Z':
                 # 禁用输出使能 -> 高阻
                 self._jc.set_pin_state(dev, pin_name, False, 'oe')
@@ -569,8 +726,48 @@ class MainWindow:
             else:
                 return
 
+            # 🔍 调试：打印设置后的 _output_bits 状态，并找出变化的位
+            print(f'=== DEBUG: 设置 {pin_name} -> {mode} 后 ===')
+            if dev in self._jc._output_bits and before_bits:
+                after_bits = self._jc._output_bits[dev]
+                num_ones = sum(1 for b in after_bits if b == 1)
+                print(f'  _output_bits 中 1 的数量: {num_ones}/{len(after_bits)}')
+                
+                # 找出所有变化的位
+                changed_indices = []
+                for i in range(min(len(before_bits), len(after_bits))):
+                    if before_bits[i] != after_bits[i]:
+                        changed_indices.append(i)
+                
+                if changed_indices:
+                    print(f'  ⚠️ 发现 {len(changed_indices)} 个位发生变化: {changed_indices[:20]}...' if len(changed_indices) > 20 else f'  ⚠️ 发现 {len(changed_indices)} 个位发生变化: {changed_indices}')
+                    # 显示每个变化的位的详细信息
+                    for idx in changed_indices[:5]:  # 只显示前 5 个
+                        print(f'    位 {idx}: {before_bits[idx]} -> {after_bits[idx]}')
+                else:
+                    print(f'  ✓ 没有其他位发生变化')
+                
+                # 获取该引脚对应的 output 和 oe 位索引
+                reg = self._io_regs.get(pin_name, {})
+                if 'output' in reg and 'oe' in reg:
+                    output_idx = reg['output']
+                    oe_idx = reg['oe']
+                    print(f'  {pin_name}: output[{output_idx}]={after_bits[output_idx] if output_idx < len(after_bits) else "N/A"}, oe[{oe_idx}]={after_bits[oe_idx] if oe_idx < len(after_bits) else "N/A"}')
+            print('=== END DEBUG ===\n')
+
             # 执行扫描，将设置应用到硬件
+            print(f'>>> 即将执行 scan() 应用设置...')
             self._jc.scan()
+            print(f'<<< scan() 完成')
+            
+            # 🔍 关键：检查 scan() 后的 _input_bits 状态
+            if dev in self._jc._input_bits:
+                input_bits = self._jc._input_bits[dev]
+                reg = self._io_regs.get(pin_name, {})
+                if 'input' in reg:
+                    input_idx = reg['input']
+                    input_val = input_bits[input_idx] if input_idx < len(input_bits) else 'N/A'
+                    print(f'  [scan 后] {pin_name} 的 input 值: {input_val}')
 
             # 立即更新网格显示
             self._sample_grid.update_states({pin_name: val})

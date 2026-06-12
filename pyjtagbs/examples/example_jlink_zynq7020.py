@@ -395,6 +395,556 @@ class jtag_worker:  # 解析bsdl文件， 基于bsdl从jtag获取数据
         print(f'--- 监控结束: 共 {count} 次采样, {changes} 次状态变化 ---')
         return changes
 
+    def test_extest_single_pin_set(self, target_pin='PS_MIO51', monitor_pins=None):
+        """函数6: 测试 EXTEST 模式下设置单个引脚时是否影响其他引脚
+        
+        Args:
+            target_pin: 要设置的引脚名称
+            monitor_pins: 要监控的其他引脚列表，None则监控几个关键引脚
+        """
+        if monitor_pins is None:
+            monitor_pins = ['PS_MIO0', 'PS_MIO1', 'PS_MIO12', 'PS_MIO13']
+        
+        print(f'\n===== 函数6: EXTEST 单引脚设置测试 =====')
+        print(f'目标引脚: {target_pin}')
+        print(f'监控引脚: {monitor_pins}')
+        print(f'预期: 只有 {target_pin} 的状态改变，其他引脚保持不变\n')
+        
+        # 切换到 EXTEST 模式
+        self.jc.set_scan_mode(self.dev_num, 'extest')
+        self.mode = 'extest'
+        
+        # 先将所有引脚设为高阻态 (Z)
+        print('--- 步骤1: 将所有引脚设为高阻态 (Z) ---')
+        all_pins = [target_pin] + monitor_pins
+        for pin_name in all_pins:
+            try:
+                reg = self.jc.bsdl[self.dev_num].io_regs.get(pin_name, {})
+                if 'oe' in reg:
+                    self.jc.set_pin_state(self.dev_num, pin_name, False, 'oe')
+                    print(f'  {pin_name}: 设置为 Z')
+            except Exception as e:
+                print(f'  {pin_name}: 设置失败 - {e}')
+        
+        # 执行一次扫描
+        self.jc.scan()
+        
+        # 读取初始状态
+        print('\n--- 步骤2: 读取初始状态 ---')
+        initial_states = {}
+        for pin in all_pins:
+            try:
+                state = self.jc.get_pin_state(self.dev_num, pin, 'output')
+                oe_state = self.jc.get_pin_state(self.dev_num, pin, 'oe')
+                initial_states[pin] = {'output': state, 'oe': oe_state}
+            except Exception as e:
+                print(f'警告: 无法读取 {pin}: {e}')
+                initial_states[pin] = {'output': -1, 'oe': -1}
+        
+        print('初始状态:')
+        for pin, states in initial_states.items():
+            print(f'  {pin:15s}: output={states["output"]}, oe={states["oe"]}')
+        
+        # 记录 _output_bits 的快照
+        print('\n--- 步骤3: 记录 _output_bits 快照 ---')
+        before_output_bits = None
+        if self.dev_num in self.jc._output_bits:
+            before_output_bits = self.jc._output_bits[self.dev_num][:]
+            print(f'  _output_bits 长度: {len(before_output_bits)}')
+            num_ones = sum(1 for b in before_output_bits if b == 1)
+            print(f'  1 的数量: {num_ones}/{len(before_output_bits)}')
+        
+        # 设置目标引脚为 1
+        print(f'\n--- 步骤4: 设置 {target_pin} -> 1 ---')
+        try:
+            reg = self.jc.bsdl[self.dev_num].io_regs.get(target_pin, {})
+            if 'output' in reg and 'oe' in reg:
+                self.jc.set_pin_state(self.dev_num, target_pin, True, 'oe')
+                self.jc.set_pin_state(self.dev_num, target_pin, True, 'output')
+                print(f'  ✓ 已设置 {target_pin} 的 output=1, oe=enable')
+        except Exception as e:
+            print(f'  ✗ 设置失败: {e}')
+            return False
+        
+        # 检查 _output_bits 的变化
+        print('\n--- 步骤5: 检查 _output_bits 变化 ---')
+        if before_output_bits and self.dev_num in self.jc._output_bits:
+            after_output_bits = self.jc._output_bits[self.dev_num]
+            changed_indices = [i for i in range(min(len(before_output_bits), len(after_output_bits))) 
+                              if before_output_bits[i] != after_output_bits[i]]
+            
+            print(f'  变化的位数量: {len(changed_indices)}')
+            if changed_indices:
+                print(f'  变化的位索引: {changed_indices[:10]}...' if len(changed_indices) > 10 else f'  变化的位索引: {changed_indices}')
+                # 检查是否只有目标引脚的 output 和 oe 位变化
+                target_output_idx = reg['output']
+                target_oe_idx = reg['oe']
+                expected_changes = {target_output_idx, target_oe_idx}
+                actual_changes = set(changed_indices)
+                
+                if actual_changes == expected_changes:
+                    print(f'  ✓ 正确: 只有 {target_pin} 的 output[{target_output_idx}] 和 oe[{target_oe_idx}] 位发生变化')
+                elif actual_changes.issubset(expected_changes):
+                    print(f'  ⚠️ 部分正确: 只有部分位发生变化 {actual_changes}')
+                else:
+                    unexpected = actual_changes - expected_changes
+                    print(f'  ✗ 错误: 有意外的位发生变化: {unexpected}')
+                    return False
+        
+        # 执行 scan()
+        print('\n--- 步骤6: 执行 scan() ---')
+        self.jc.scan()
+        print(f'  ✓ scan() 完成')
+        
+        # 读取最终状态
+        print('\n--- 步骤7: 读取最终状态 ---')
+        final_states = {}
+        for pin in all_pins:
+            try:
+                state = self.jc.get_pin_state(self.dev_num, pin, 'output')
+                oe_state = self.jc.get_pin_state(self.dev_num, pin, 'oe')
+                final_states[pin] = {'output': state, 'oe': oe_state}
+            except Exception as e:
+                print(f'警告: 无法读取 {pin}: {e}')
+                final_states[pin] = {'output': -1, 'oe': -1}
+        
+        print('最终状态:')
+        for pin, states in final_states.items():
+            init = initial_states[pin]
+            print(f'  {pin:15s}: output={init["output"]}->{states["output"]}, oe={init["oe"]}->{states["oe"]}')
+        
+        # 检查结果
+        print('\n--- 测试结果 ---')
+        success = True
+        
+        # 检查目标引脚是否正确设置
+        if final_states[target_pin]['output'] != 1:
+            print(f'  ✗ {target_pin} 的 output 未正确设置为 1')
+            success = False
+        else:
+            print(f'  ✓ {target_pin} 的 output 正确设置为 1')
+        
+        # 检查其他引脚是否保持不变
+        for pin in monitor_pins:
+            if pin in final_states and pin in initial_states:
+                if (final_states[pin]['output'] != initial_states[pin]['output'] or
+                    final_states[pin]['oe'] != initial_states[pin]['oe']):
+                    print(f'  ✗ {pin} 的状态发生了意外变化!')
+                    print(f'      output: {initial_states[pin]["output"]} -> {final_states[pin]["output"]}')
+                    print(f'      oe:     {initial_states[pin]["oe"]} -> {final_states[pin]["oe"]}')
+                    success = False
+                else:
+                    print(f'  ✓ {pin} 的状态保持不变')
+        
+        if success:
+            print(f'\n✓ 测试通过: 只有 {target_pin} 的状态改变，其他引脚不受影响')
+        else:
+            print(f'\n✗ 测试失败: 设置 {target_pin} 影响了其他引脚')
+        
+        # 切回 SAMPLE 模式
+        self.jc.set_scan_mode(self.dev_num, 'sample')
+        self.mode = 'sample'
+        
+        return success
+
+    def test_extest_stability(self, monitor_pins=None, duration_s=5, interval_ms=100):
+        """函数5: 测试 EXTEST 模式下引脚状态的稳定性（不主动设置任何引脚）"""
+        if monitor_pins is None:
+            monitor_pins = ['PS_MIO51', 'PS_MIO0', 'PS_MIO1']
+        
+        print(f'\n===== 函数5: EXTEST 模式稳定性测试 =====')
+        print(f'监控引脚: {monitor_pins}')
+        print(f'持续时间: {duration_s}s, 采样间隔: {interval_ms}ms')
+        
+        # 切换到 EXTEST 模式
+        self.jc.set_scan_mode(self.dev_num, 'extest')
+        self.mode = 'extest'
+        
+        # 将所有引脚设为高阻态 (Z)
+        for pin_name in monitor_pins:
+            try:
+                reg = self.jc.bsdl[self.dev_num].io_regs.get(pin_name, {})
+                if 'oe' in reg:
+                    self.jc.set_pin_state(self.dev_num, pin_name, False, 'oe')
+            except Exception:
+                pass
+        
+        # 执行一次扫描
+        self.jc.scan()
+        
+        # 读取初始状态
+        initial_states = {}
+        for pin in monitor_pins:
+            try:
+                state = self.jc.get_pin_state(self.dev_num, pin, 'output')
+                initial_states[pin] = state
+            except Exception:
+                initial_states[pin] = -1
+        
+        print('初始状态:')
+        for pin, state in initial_states.items():
+            print(f'  {pin:15s} = {state}')
+        
+        # 开始监控
+        total_samples = int(duration_s * 1000 / interval_ms)
+        interval_s = interval_ms / 1000.0
+        changes_detected = []
+        
+        for i in range(total_samples):
+            t0 = time.perf_counter()
+            self.jc.scan()
+            
+            for pin in monitor_pins:
+                try:
+                    state = self.jc.get_pin_state(self.dev_num, pin, 'output')
+                    if state != initial_states[pin]:
+                        changes_detected.append((i+1, pin, initial_states[pin], state))
+                        initial_states[pin] = state
+                except Exception:
+                    pass
+            
+            sleep_time = interval_s - (time.perf_counter() - t0)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+        
+        # 统计结果
+        print(f'\n--- 测试结果 ---')
+        if len(changes_detected) == 0:
+            print(f'✓ 测试通过: 所有引脚状态稳定')
+            result = True
+        else:
+            print(f'✗ 测试失败: 检测到 {len(changes_detected)} 次变化')
+            for sample, pin, old_val, new_val in changes_detected[:5]:
+                print(f'  样本 {sample}: {pin} {old_val} -> {new_val}')
+            result = False
+        
+        # 切回 SAMPLE 模式
+        self.jc.set_scan_mode(self.dev_num, 'sample')
+        self.mode = 'sample'
+        
+        return result
+        
+        Args:
+            target_pin: 要设置的引脚名称
+            monitor_pins: 要监控的其他引脚列表，None则监控几个关键引脚
+        """
+        if monitor_pins is None:
+            monitor_pins = ['PS_MIO0', 'PS_MIO1', 'PS_MIO12', 'PS_MIO13']
+        
+        print(f'\n===== 函数6: EXTEST 单引脚设置测试 =====')
+        print(f'目标引脚: {target_pin}')
+        print(f'监控引脚: {monitor_pins}')
+        print(f'预期: 只有 {target_pin} 的状态改变，其他引脚保持不变\n')
+        
+        # 切换到 EXTEST 模式
+        self.jc.set_scan_mode(self.dev_num, 'extest')
+        self.mode = 'extest'
+        
+        # 先将所有引脚设为高阻态 (Z)
+        print('--- 步骤1: 将所有引脚设为高阻态 (Z) ---')
+        all_pins = [target_pin] + monitor_pins
+        for pin_name in all_pins:
+            try:
+                reg = self.jc.bsdl[self.dev_num].io_regs.get(pin_name, {})
+                if 'oe' in reg:
+                    self.jc.set_pin_state(self.dev_num, pin_name, False, 'oe')
+                    print(f'  {pin_name}: 设置为 Z')
+            except Exception as e:
+                print(f'  {pin_name}: 设置失败 - {e}')
+        
+        # 执行一次扫描
+        self.jc.scan()
+        
+        # 读取初始状态
+        print('\n--- 步骤2: 读取初始状态 ---')
+        initial_states = {}
+        for pin in all_pins:
+            try:
+                state = self.jc.get_pin_state(self.dev_num, pin, 'output')
+                oe_state = self.jc.get_pin_state(self.dev_num, pin, 'oe')
+                initial_states[pin] = {'output': state, 'oe': oe_state}
+            except Exception as e:
+                print(f'警告: 无法读取 {pin}: {e}')
+                initial_states[pin] = {'output': -1, 'oe': -1}
+        
+        print('初始状态:')
+        for pin, states in initial_states.items():
+            print(f'  {pin:15s}: output={states["output"]}, oe={states["oe"]}')
+        
+        # 记录 _output_bits 的快照
+        print('\n--- 步骤3: 记录 _output_bits 快照 ---')
+        before_output_bits = None
+        if self.dev_num in self.jc._output_bits:
+            before_output_bits = self.jc._output_bits[self.dev_num][:]
+            print(f'  _output_bits 长度: {len(before_output_bits)}')
+            num_ones = sum(1 for b in before_output_bits if b == 1)
+            print(f'  1 的数量: {num_ones}/{len(before_output_bits)}')
+        
+        # 设置目标引脚为 1
+        print(f'\n--- 步骤4: 设置 {target_pin} -> 1 ---')
+        try:
+            reg = self.jc.bsdl[self.dev_num].io_regs.get(target_pin, {})
+            if 'output' in reg and 'oe' in reg:
+                self.jc.set_pin_state(self.dev_num, target_pin, True, 'oe')
+                self.jc.set_pin_state(self.dev_num, target_pin, True, 'output')
+                print(f'  ✓ 已设置 {target_pin} 的 output=1, oe=enable')
+        except Exception as e:
+            print(f'  ✗ 设置失败: {e}')
+            return False
+        
+        # 检查 _output_bits 的变化
+        print('\n--- 步骤5: 检查 _output_bits 变化 ---')
+        if before_output_bits and self.dev_num in self.jc._output_bits:
+            after_output_bits = self.jc._output_bits[self.dev_num]
+            changed_indices = [i for i in range(min(len(before_output_bits), len(after_output_bits))) 
+                              if before_output_bits[i] != after_output_bits[i]]
+            
+            print(f'  变化的位数量: {len(changed_indices)}')
+            if changed_indices:
+                print(f'  变化的位索引: {changed_indices[:10]}...' if len(changed_indices) > 10 else f'  变化的位索引: {changed_indices}')
+                # 检查是否只有目标引脚的 output 和 oe 位变化
+                target_output_idx = reg['output']
+                target_oe_idx = reg['oe']
+                expected_changes = {target_output_idx, target_oe_idx}
+                actual_changes = set(changed_indices)
+                
+                if actual_changes == expected_changes:
+                    print(f'  ✓ 正确: 只有 {target_pin} 的 output[{target_output_idx}] 和 oe[{target_oe_idx}] 位发生变化')
+                elif actual_changes.issubset(expected_changes):
+                    print(f'  ⚠️ 部分正确: 只有部分位发生变化 {actual_changes}')
+                else:
+                    unexpected = actual_changes - expected_changes
+                    print(f'  ✗ 错误: 有意外的位发生变化: {unexpected}')
+                    return False
+        
+        # 执行 scan()
+        print('\n--- 步骤6: 执行 scan() ---')
+        self.jc.scan()
+        print(f'  ✓ scan() 完成')
+        
+        # 读取最终状态
+        print('\n--- 步骤7: 读取最终状态 ---')
+        final_states = {}
+        for pin in all_pins:
+            try:
+                state = self.jc.get_pin_state(self.dev_num, pin, 'output')
+                oe_state = self.jc.get_pin_state(self.dev_num, pin, 'oe')
+                final_states[pin] = {'output': state, 'oe': oe_state}
+            except Exception as e:
+                print(f'警告: 无法读取 {pin}: {e}')
+                final_states[pin] = {'output': -1, 'oe': -1}
+        
+        print('最终状态:')
+        for pin, states in final_states.items():
+            init = initial_states[pin]
+            print(f'  {pin:15s}: output={init["output"]}->{states["output"]}, oe={init["oe"]}->{states["oe"]}')
+        
+        # 检查结果
+        print('\n--- 测试结果 ---')
+        success = True
+        
+        # 检查目标引脚是否正确设置
+        if final_states[target_pin]['output'] != 1:
+            print(f'  ✗ {target_pin} 的 output 未正确设置为 1')
+            success = False
+        else:
+            print(f'  ✓ {target_pin} 的 output 正确设置为 1')
+        
+        # 检查其他引脚是否保持不变
+        for pin in monitor_pins:
+            if pin in final_states and pin in initial_states:
+                if (final_states[pin]['output'] != initial_states[pin]['output'] or
+                    final_states[pin]['oe'] != initial_states[pin]['oe']):
+                    print(f'  ✗ {pin} 的状态发生了意外变化!')
+                    print(f'      output: {initial_states[pin]["output"]} -> {final_states[pin]["output"]}')
+                    print(f'      oe:     {initial_states[pin]["oe"]} -> {final_states[pin]["oe"]}')
+                    success = False
+                else:
+                    print(f'  ✓ {pin} 的状态保持不变')
+        
+        if success:
+            print(f'\n✓ 测试通过: 只有 {target_pin} 的状态改变，其他引脚不受影响')
+        else:
+            print(f'\n✗ 测试失败: 设置 {target_pin} 影响了其他引脚')
+        
+        # 切回 SAMPLE 模式
+        self.jc.set_scan_mode(self.dev_num, 'sample')
+        self.mode = 'sample'
+        
+        return success
+        """函数5: 测试 EXTEST 模式下引脚状态的稳定性（不主动设置任何引脚）
+            
+        验证进入 EXTEST 模式后，如果不主动设置引脚状态，引脚应该保持稳定
+            
+        Args:
+            monitor_pins: 要监控的引脚列表，如 ['PS_MIO51', 'PS_MIO0']，None则监控所有引脚
+            duration_s: 监控持续时间(秒)
+            interval_ms: 采样间隔(毫秒)
+        """
+        if monitor_pins is None:
+            # 默认监控几个关键引脚
+            monitor_pins = ['PS_MIO51', 'PS_MIO0', 'PS_MIO1', 'PS_MIO12', 'PS_MIO13']
+            
+        total_samples = int(duration_s * 1000 / interval_ms)
+        interval_s = interval_ms / 1000.0
+            
+        print(f'\n===== 函数5: EXTEST 模式稳定性测试 =====')
+        print(f'监控引脚: {monitor_pins}')
+        print(f'持续时间: {duration_s}s, 采样间隔: {interval_ms}ms, 总采样次数: {total_samples}')
+        print(f'预期: 所有引脚状态应保持不变（除非外部电路改变）\n')
+            
+        # 切换到 EXTEST 模式
+        self.jc.set_scan_mode(self.dev_num, 'extest')
+        self.mode = 'extest'
+            
+        # ⚠️ 重要：先将所有引脚设为高阻态 (Z)
+        print('--- 步骤1: 将所有引脚设为高阻态 (Z) ---')
+        for pin_name in monitor_pins:
+            try:
+                reg = self.jc.bsdl[self.dev_num].io_regs.get(pin_name, {})
+                if 'oe' in reg:
+                    # 禁用输出使能 -> 高阻
+                    self.jc.set_pin_state(self.dev_num, pin_name, False, 'oe')
+                    print(f'  {pin_name}: 设置为 Z (高阻)')
+            except Exception as e:
+                print(f'  {pin_name}: 设置失败 - {e}')
+            
+        # 执行一次扫描，应用高阻态设置
+        print('\n--- 步骤2: 执行 scan() 应用高阻态设置 ---')
+        self.jc.scan()
+            
+        # 读取并记录 _output_bits 的初始状态
+        print('\n--- 步骤3: 记录 _output_bits 初始状态 ---')
+        output_bits_snapshot = {}
+        if self.dev_num in self.jc._output_bits:
+            output_bits_snapshot = self.jc._output_bits[self.dev_num][:]  # 复制一份
+            print(f'  _output_bits 长度: {len(output_bits_snapshot)}')
+            # 显示前 20 位的值
+            sample_bits = output_bits_snapshot[:min(20, len(output_bits_snapshot))]
+            print(f'  前 20 位: {sample_bits}')
+        else:
+            print(f'  警告: 设备 {self.dev_num} 没有 _output_bits')
+            
+        # 读取初始状态
+        print('\n--- 步骤4: 读取初始引脚状态 ---')
+        initial_states = {}
+        for pin in monitor_pins:
+            try:
+                state = self.jc.get_pin_state(self.dev_num, pin, 'output')
+                oe_state = self.jc.get_pin_state(self.dev_num, pin, 'oe')
+                initial_states[pin] = {'output': state, 'oe': oe_state}
+            except Exception as e:
+                print(f'警告: 无法读取 {pin}: {e}')
+                initial_states[pin] = {'output': -1, 'oe': -1}
+            
+        print('初始状态:')
+        for pin, states in initial_states.items():
+            print(f'  {pin:15s}: output={states["output"]}, oe={states["oe"]}')
+            
+        # 开始监控
+        print(f'\n--- 步骤5: 开始监控 ({duration_s}s, 每 {interval_ms}ms 采样一次) ---')
+        state_history = {pin: [] for pin in monitor_pins}
+        start_time = time.perf_counter()
+            
+        changes_detected = []
+            
+        for i in range(total_samples):
+            t0 = time.perf_counter()
+                
+            # 只执行扫描，不设置任何引脚状态
+            self.jc.scan()
+                
+            # 检查 _output_bits 是否发生变化
+            if self.dev_num in self.jc._output_bits and output_bits_snapshot:
+                current_output_bits = self.jc._output_bits[self.dev_num]
+                if current_output_bits != output_bits_snapshot:
+                    # 找到变化的位
+                    changed_indices = [idx for idx in range(len(current_output_bits)) 
+                                      if idx < len(output_bits_snapshot) and current_output_bits[idx] != output_bits_snapshot[idx]]
+                    if changed_indices:
+                        print(f'  ⚠️ 样本 {i+1}: _output_bits 发生变化! 变化的位索引: {changed_indices[:10]}...')
+                        # 更新快照
+                        output_bits_snapshot = current_output_bits[:]
+                
+            # 读取所有监控引脚的状态
+            current_states = {}
+            for pin in monitor_pins:
+                try:
+                    state = self.jc.get_pin_state(self.dev_num, pin, 'output')
+                    oe_state = self.jc.get_pin_state(self.dev_num, pin, 'oe')
+                    current_states[pin] = {'output': state, 'oe': oe_state}
+                    state_history[pin].append(current_states[pin])
+                except Exception:
+                    current_states[pin] = {'output': -1, 'oe': -1}
+                    state_history[pin].append(current_states[pin])
+                
+            elapsed_s = time.perf_counter() - start_time
+                
+            # 检查是否有变化
+            has_change = any(
+                current_states[pin]['output'] != initial_states[pin]['output'] or
+                current_states[pin]['oe'] != initial_states[pin]['oe']
+                for pin in monitor_pins 
+                if initial_states[pin]['output'] != -1 and current_states[pin]['output'] != -1
+            )
+                
+            if i == 0 or has_change:
+                change_flags = []
+                for pin in monitor_pins:
+                    init = initial_states[pin]
+                    curr = current_states[pin]
+                    if init['output'] != -1 and curr['output'] != -1:
+                        if curr['output'] != init['output'] or curr['oe'] != init['oe']:
+                            change_flags.append(f'{pin}:out({init["output"]}->{curr["output"]}),oe({init["oe"]}->{curr["oe"]})')
+                    
+                flag_str = f' <<< 变化: {", ".join(change_flags)}' if change_flags else ''
+                if change_flags:
+                    changes_detected.extend(change_flags)
+                    print(f'[{i+1:3d}] t={elapsed_s:.2f}s{flag_str}')
+                
+            # 等待剩余时间
+            sleep_time = interval_s - (time.perf_counter() - t0)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            
+        # 统计结果
+        print(f'\n--- 测试结果统计 ---')
+        all_stable = True
+        for pin in monitor_pins:
+            history = [s for s in state_history[pin] if s['output'] != -1]
+            if len(history) == 0:
+                continue
+                
+            unique_output = set(h['output'] for h in history)
+            unique_oe = set(h['oe'] for h in history)
+                
+            output_changes = sum(1 for i in range(1, len(history)) if history[i]['output'] != history[i-1]['output'])
+            oe_changes = sum(1 for i in range(1, len(history)) if history[i]['oe'] != history[i-1]['oe'])
+                
+            print(f'{pin:15s}:')
+            print(f'  初始值: output={initial_states[pin]["output"]}, oe={initial_states[pin]["oe"]}')
+            print(f'  最终值: output={history[-1]["output"]}, oe={history[-1]["oe"]}')
+            print(f'  output 唯一状态: {unique_output}, 变化次数: {output_changes}/{len(history)-1}')
+            print(f'  oe     唯一状态: {unique_oe}, 变化次数: {oe_changes}/{len(history)-1}')
+                
+            if len(unique_output) > 1 or len(unique_oe) > 1:
+                print(f'  ✗ 不稳定: 状态发生了变化')
+                all_stable = False
+            else:
+                print(f'  ✓ 稳定: 状态保持不变')
+            
+        if all_stable:
+            print(f'\n✓ 测试通过: EXTEST 模式下所有引脚状态稳定，未发生自发变化')
+        else:
+            print(f'\n✗ 测试失败: 部分引脚状态发生了自发变化')
+            print(f'  检测到的变化: {changes_detected[:5]}...' if len(changes_detected) > 5 else f'  检测到的变化: {changes_detected}')
+            
+        # 切回 SAMPLE 模式
+        self.jc.set_scan_mode(self.dev_num, 'sample')
+        self.mode = 'sample'
+            
+        return all_stable
+
 
 if __name__ == '__main__':
     # 文件路径（基于脚本位置计算，不依赖 cwd）
@@ -486,3 +1036,22 @@ if __name__ == '__main__':
     '''
     print('\n===== 函数4: 监控 PS_MIO0 当 PS_MIO51 闪烁时 =====')
     changes = jw.monitor_pin_during_extest('PS_MIO0', 'PS_MIO51', freq_hz=2, duration_s=3)
+
+    '''
+    函数5: EXTEST 模式稳定性测试 - 验证不主动设置时引脚状态是否稳定
+    '''
+    print('\n===== 函数5: EXTEST 模式稳定性测试 =====')
+    stable = jw.test_extest_stability(
+        monitor_pins=['PS_MIO51', 'PS_MIO0', 'PS_MIO1'],
+        duration_s=5,
+        interval_ms=100
+    )
+
+    '''
+    函数6: EXTEST 单引脚设置测试 - 验证设置一个引脚时是否影响其他引脚
+    '''
+    print('\n===== 函数6: EXTEST 单引脚设置测试 =====')
+    success = jw.test_extest_single_pin_set(
+        target_pin='PS_MIO51',
+        monitor_pins=['PS_MIO0', 'PS_MIO1']
+    )
